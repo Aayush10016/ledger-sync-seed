@@ -57,18 +57,38 @@ public final class IngestService {
         }
 
         List<NormalizedTxn> existingTxns = store.all();
-        java.util.Set<String> existingKeys = new java.util.HashSet<>();
+        java.util.Map<String, java.util.Set<String>> existingKeysToMsgIds = new java.util.HashMap<>();
         for (NormalizedTxn e : existingTxns) {
-            existingKeys.add(e.accountLast4() + "|" + e.occurredAt().toEpochSecond() + "|" + e.direction() + "|" + e.amount());
+            String key = e.accountLast4() + "|" + e.occurredAt().toEpochSecond() + "|" + e.direction() + "|" + e.amount();
+            existingKeysToMsgIds.computeIfAbsent(key, k -> new java.util.HashSet<>()).addAll(e.sourceMessageIds());
         }
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
         int written = 0;
         for (NormalizedTxn t : txns) {
             String key = t.accountLast4() + "|" + t.occurredAt().toEpochSecond() + "|" + t.direction() + "|" + t.amount();
-            if (!existingKeys.contains(key)) {
+            java.util.Set<String> existingIds = existingKeysToMsgIds.get(key);
+            
+            if (existingIds == null) {
                 store.save(t);
                 written++;
+            } else {
+                // If the transaction exists, check if there are NEW message IDs not yet saved
+                java.util.List<String> newIds = new java.util.ArrayList<>();
+                for (String msgId : t.sourceMessageIds()) {
+                    if (!existingIds.contains(msgId)) {
+                        newIds.add(msgId);
+                    }
+                }
+                
+                if (!newIds.isEmpty()) {
+                    // Save ONLY the new message IDs for the existing transaction
+                    store.save(new NormalizedTxn(
+                        t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), 
+                        t.category(), t.merchant(), newIds
+                    ));
+                    written++;
+                }
             }
         }
 

@@ -217,9 +217,9 @@ DynamoDB provides strict guarantees around high-performance scaling through its 
 - *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys.
 
 #### Q3: `byMessageId(messageId)`
-- **ScannedCount:** `1` (Direct point-read using `GetItem`)
-- **Count:** `1`
-- *Why:* Message-to-transaction mappings are stored as independent index items (`MSG#m-0001`). `GetItem` fetches exactly one item in O(1) time.
+- **ScannedCount:** `Not exposed by GetItem (Conceptually 1)`
+- **Count:** `Not exposed by GetItem (Conceptually 1 or 0)`
+- *Why:* DynamoDB's `GetItem` API does not return `ScannedCount` or `Count` because it is an explicit O(1) Hash Map lookup. The engine mathematically examines exactly **1 item** and returns **1 item** (or 0 if not found), independent of the 100,000 records in the table.
 
 ### Decision Log
 

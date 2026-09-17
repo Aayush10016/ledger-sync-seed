@@ -45,7 +45,7 @@ public final class ConsistencyChecker {
                 return new in.simplifymoney.ledgersync.model.NormalizedTxn(
                     existing.accountLast4(), existing.occurredAt(), existing.direction(),
                     existing.amount(), existing.category(), existing.merchant(),
-                    new java.util.ArrayList<>(mergedIds)
+                    mergedIds.stream().sorted().toList()
                 );
             });
         }

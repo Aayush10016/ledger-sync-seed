@@ -118,10 +118,8 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public void save(NormalizedTxn txn) {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();
-        // Deterministic SK based on source messages ensures true idempotency for retries
-        List<String> sortedMsgIds = new ArrayList<>(txn.sourceMessageIds());
-        Collections.sort(sortedMsgIds);
-        String hash = String.valueOf(Math.abs(Objects.hash(sortedMsgIds)));
+        // Deterministic SK based on transaction attributes ensures true idempotency for retries
+        String hash = String.valueOf(Math.abs(Objects.hash(txn.direction(), txn.amount())));
         String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + hash;
 
         Map<String, AttributeValue> item = new HashMap<>();
@@ -135,6 +133,53 @@ public class DynamoDbLedgerStore implements DocumentStore {
         if (txn.merchant() != null) {
             item.put("merchant", AttributeValue.builder().s(txn.merchant()).build());
         }
+        // Check if transaction already exists (Idempotent Update Check)
+        GetItemRequest checkReq = GetItemRequest.builder()
+                .tableName(tableName)
+                .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
+                .build();
+        GetItemResponse checkRes = client.getItem(checkReq);
+
+        if (checkRes.hasItem()) {
+            // Transaction already exists! We only add new message index items if there are any.
+            // We ALSO update the main transaction's sourceMessageIds string set.
+            // We DO NOT update category totals.
+            List<TransactWriteItem> writeItems = new ArrayList<>();
+            for (String msgId : txn.sourceMessageIds()) {
+                Map<String, AttributeValue> msgItem = new HashMap<>(item);
+                msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
+                msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+                writeItems.add(TransactWriteItem.builder()
+                        .put(Put.builder()
+                                .tableName(tableName)
+                                .item(msgItem)
+                                .conditionExpression("attribute_not_exists(PK)")
+                                .build())
+                        .build());
+            }
+            if (!writeItems.isEmpty()) {
+                writeItems.add(TransactWriteItem.builder()
+                        .update(Update.builder()
+                                .tableName(tableName)
+                                .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
+                                .updateExpression("ADD sourceMessageIds :newIds")
+                                .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build()))
+                                .build())
+                        .build());
+
+                try {
+                    client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
+                } catch (TransactionCanceledException e) {
+                     if (!e.cancellationReasons().isEmpty() && "ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
+                        System.out.println("Message ID collision during update, skipping: " + e.getMessage());
+                     } else {
+                         throw new IllegalStateException("Message index update failed: " + e.getMessage(), e);
+                     }
+                }
+            }
+            return;
+        }
+
         if (!txn.sourceMessageIds().isEmpty()) {
             item.put("sourceMessageIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build());
         }
