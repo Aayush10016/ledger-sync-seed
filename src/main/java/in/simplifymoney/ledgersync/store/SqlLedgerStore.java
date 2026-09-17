@@ -111,7 +111,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         Category.valueOf(rs.getString(5)),
                         rs.getString(6),
                         Arrays.stream(rs.getString(7).split(","))
-                                .filter(s -> !s.isBlank()).toList()));
+                                .filter(s -> !s.isBlank()).sorted().toList()));
             }
         } catch (SQLException e) {
             throw new IllegalStateException("could not read the ledger", e);

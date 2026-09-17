@@ -24,13 +24,21 @@ public class DynamoDbLedgerStoreIntegrationTest {
     public void setup() {
         DynamoDbClient client = DynamoDbClient.builder()
                 .endpointOverride(URI.create("http://localhost:8000"))
+                .region(software.amazon.awssdk.regions.Region.US_EAST_1)
+                .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
+                        software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("dummy", "dummy")))
                 .build();
         
         try {
             client.deleteTable(DeleteTableRequest.builder().tableName("LedgerStore").build());
+            // wait for deletion
+            client.waiter().waitUntilTableNotExists(b -> b.tableName("LedgerStore"));
         } catch (ResourceNotFoundException e) {} // ignore
 
         store = new DynamoDbLedgerStore(client);
+        
+        // Wait for creation to complete
+        client.waiter().waitUntilTableExists(b -> b.tableName("LedgerStore"));
     }
 
     @Test

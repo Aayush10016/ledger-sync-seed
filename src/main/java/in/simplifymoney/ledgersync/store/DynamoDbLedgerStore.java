@@ -170,23 +170,33 @@ public class DynamoDbLedgerStore implements DocumentStore {
             msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
             msgItem.put("SK", AttributeValue.builder().s("MSG").build());
             writeItems.add(TransactWriteItem.builder()
-                    .put(Put.builder().tableName(tableName).item(msgItem).build())
+                    .put(Put.builder()
+                            .tableName(tableName)
+                            .item(msgItem)
+                            .conditionExpression("attribute_not_exists(PK)")
+                            .build())
                     .build());
         }
 
         try {
             client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
         } catch (TransactionCanceledException e) {
-            // If the transaction already exists (ConditionCheckFailed), we ignore it safely.
+            // If the primary transaction item already exists, this is a safe idempotent retry.
+            // If the condition failed on a MSG# index but NOT the ACCT# index, it means there's a collision!
             if (!e.cancellationReasons().isEmpty() && "ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
                 System.out.println("Transaction already exists, skipping to maintain idempotency.");
             } else {
-                throw e;
+                throw new IllegalStateException("Transaction failed (possible message ID overwrite collision): " + e.getMessage(), e);
             }
         }
     }
 
     private NormalizedTxn deserialize(Map<String, AttributeValue> item) {
+        List<String> sortedIds = item.containsKey("sourceMessageIds") 
+            ? new ArrayList<>(item.get("sourceMessageIds").ss())
+            : new ArrayList<>();
+        Collections.sort(sortedIds);
+
         return new NormalizedTxn(
                 item.get("accountLast4").s(),
                 java.time.OffsetDateTime.parse(item.get("occurredAt").s()),
@@ -194,7 +204,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 new BigDecimal(item.get("amount").s()),
                 in.simplifymoney.ledgersync.model.Category.valueOf(item.get("category").s()),
                 item.containsKey("merchant") ? item.get("merchant").s() : null,
-                item.containsKey("sourceMessageIds") ? item.get("sourceMessageIds").ss() : List.of()
+                sortedIds
         );
     }
 }
