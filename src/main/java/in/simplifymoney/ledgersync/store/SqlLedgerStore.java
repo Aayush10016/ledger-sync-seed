@@ -32,7 +32,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
     public SqlLedgerStore(Path dbFile) {
         try {
             this.conn = DriverManager.getConnection(
-                    URL_PREFIX + dbFile.toAbsolutePath() + ";MODE=PostgreSQL", "sa", "");
+                    URL_PREFIX + dbFile.toAbsolutePath(), "sa", "");
         } catch (SQLException e) {
             throw new IllegalStateException(
                     "could not open the ledger database at " + dbFile
@@ -60,7 +60,12 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         if (rs.next()) continue;
                     }
                 }
-                String sql = Files.readString(f);
+                String sql;
+                try {
+                    sql = Files.readString(f);
+                } catch (java.nio.charset.MalformedInputException | java.nio.charset.UnmappableCharacterException ex) {
+                    sql = Files.readString(f, java.nio.charset.StandardCharsets.UTF_16LE);
+                }
                 for (String stmt : sql.split(";")) {
                     if (!stmt.isBlank()) st.execute(stmt);
                 }
