@@ -56,12 +56,23 @@ public final class IngestService {
             }
         }
 
-        List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
-        for (NormalizedTxn t : txns) {
-            store.save(t);
+        List<NormalizedTxn> existingTxns = store.all();
+        java.util.Set<String> existingKeys = new java.util.HashSet<>();
+        for (NormalizedTxn e : existingTxns) {
+            existingKeys.add(e.accountLast4() + "|" + e.occurredAt().toEpochSecond() + "|" + e.direction() + "|" + e.amount());
         }
 
-        return new Stats(messages.size(), txns.size(), skipped);
+        List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
+        int written = 0;
+        for (NormalizedTxn t : txns) {
+            String key = t.accountLast4() + "|" + t.occurredAt().toEpochSecond() + "|" + t.direction() + "|" + t.amount();
+            if (!existingKeys.contains(key)) {
+                store.save(t);
+                written++;
+            }
+        }
+
+        return new Stats(messages.size(), written, skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -101,6 +112,12 @@ public final class IngestService {
         }
 
         // Compute Discrepancies
+        List<in.simplifymoney.ledgersync.model.Discrepancy> existingDisc = store.discrepancies();
+        java.util.Set<String> existingDiscKeys = new java.util.HashSet<>();
+        for (in.simplifymoney.ledgersync.model.Discrepancy d : existingDisc) {
+            existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount());
+        }
+
         Map<String, List<ParsedTxn>> byAcct = new LinkedHashMap<>();
         for (ParsedTxn p : uniqueParsed) {
             byAcct.computeIfAbsent(p.accountLast4(), k -> new ArrayList<>()).add(p);
@@ -128,7 +145,11 @@ public final class IngestService {
                                     acct, p.occurredAt(), diff,
                                     "ledger computed " + expected.toPlainString() + " but bank reported " + p.statedBalance().toPlainString()
                             );
-                            store.save(d);
+                            String dKey = d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount();
+                            if (!existingDiscKeys.contains(dKey)) {
+                                store.save(d);
+                                existingDiscKeys.add(dKey);
+                            }
                         }
                     }
                     lastBalance = p.statedBalance();
