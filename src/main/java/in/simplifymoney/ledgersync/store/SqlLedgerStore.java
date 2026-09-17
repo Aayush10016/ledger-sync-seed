@@ -78,6 +78,18 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn t) {
+        // Idempotency: Delete any existing rows matching the transaction exact key to avoid duplication on re-ingestion
+        try (PreparedStatement del = conn.prepareStatement(
+                "DELETE FROM ledger WHERE account_last4 = ? AND occurred_at = ? AND direction = ? AND amount = ?")) {
+            del.setString(1, t.accountLast4());
+            del.setString(2, t.occurredAt().toString());
+            del.setString(3, t.direction().name());
+            del.setBigDecimal(4, t.amount());
+            del.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not execute idempotent delete for " + t, e);
+        }
+
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
                         + " category, merchant, source_message_ids)"

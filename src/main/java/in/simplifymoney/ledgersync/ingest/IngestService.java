@@ -82,10 +82,19 @@ public final class IngestService {
                 }
                 
                 if (!newIds.isEmpty()) {
-                    // Save ONLY the new message IDs for the existing transaction
+                    // Fully merge old and new message IDs, sort and deduplicate them
+                    java.util.List<String> combined = new java.util.ArrayList<>(existingIds);
+                    for (String newId : newIds) {
+                        if (!combined.contains(newId)) {
+                            combined.add(newId);
+                        }
+                    }
+                    java.util.Collections.sort(combined);
+
+                    // Update the existing transaction with the fully merged IDs atomically
                     store.save(new NormalizedTxn(
                         t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), 
-                        t.category(), t.merchant(), newIds
+                        t.category(), t.merchant(), combined
                     ));
                     written++;
                 }

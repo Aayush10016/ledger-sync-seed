@@ -144,18 +144,24 @@ public class DynamoDbLedgerStore implements DocumentStore {
             // Transaction already exists! We only add new message index items if there are any.
             // We ALSO update the main transaction's sourceMessageIds string set.
             // We DO NOT update category totals.
+            List<String> existingIds = checkRes.item().containsKey("sourceMessageIds") 
+                ? checkRes.item().get("sourceMessageIds").ss() 
+                : new ArrayList<>();
+            
             List<TransactWriteItem> writeItems = new ArrayList<>();
             for (String msgId : txn.sourceMessageIds()) {
-                Map<String, AttributeValue> msgItem = new HashMap<>(item);
-                msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
-                msgItem.put("SK", AttributeValue.builder().s("MSG").build());
-                writeItems.add(TransactWriteItem.builder()
-                        .put(Put.builder()
-                                .tableName(tableName)
-                                .item(msgItem)
-                                .conditionExpression("attribute_not_exists(PK)")
-                                .build())
-                        .build());
+                if (!existingIds.contains(msgId)) {
+                    Map<String, AttributeValue> msgItem = new HashMap<>(item);
+                    msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
+                    msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+                    writeItems.add(TransactWriteItem.builder()
+                            .put(Put.builder()
+                                    .tableName(tableName)
+                                    .item(msgItem)
+                                    .conditionExpression("attribute_not_exists(PK)")
+                                    .build())
+                            .build());
+                }
             }
             if (!writeItems.isEmpty()) {
                 writeItems.add(TransactWriteItem.builder()
