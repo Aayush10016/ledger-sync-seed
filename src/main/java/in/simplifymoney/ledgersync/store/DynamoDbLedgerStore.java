@@ -8,6 +8,7 @@ import software.amazon.awssdk.services.dynamodb.model.*;
 import java.math.BigDecimal;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 import java.util.*;
 
 public class DynamoDbLedgerStore implements DocumentStore {
@@ -117,9 +118,11 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public void save(NormalizedTxn txn) {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();
-        // Deterministic SK based on transaction properties to ensure idempotency across retries
-        String hash = String.valueOf(Math.abs(Objects.hash(txn.direction(), txn.amount(), txn.category())));
-        String txnSk = "TXN#" + month + "#" + txn.occurredAt().toString() + "#" + hash;
+        // Deterministic SK based on source messages ensures true idempotency for retries
+        List<String> sortedMsgIds = new ArrayList<>(txn.sourceMessageIds());
+        Collections.sort(sortedMsgIds);
+        String hash = String.valueOf(Math.abs(Objects.hash(sortedMsgIds)));
+        String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + hash;
 
         Map<String, AttributeValue> item = new HashMap<>();
         item.put("PK", AttributeValue.builder().s(acctPk).build());

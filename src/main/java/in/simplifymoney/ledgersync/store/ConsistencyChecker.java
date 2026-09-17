@@ -39,7 +39,7 @@ public final class ConsistencyChecker {
         java.util.Set<String> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
         java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> cleanSqlTxns = new java.util.ArrayList<>();
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : allSqlTxns) {
-            String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt() + "|" + txn.direction() + "|" + txn.amount();
+            String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
             if (seen.add(deduplicationKey)) {
                 cleanSqlTxns.add(txn);
             }
@@ -58,15 +58,32 @@ public final class ConsistencyChecker {
             acctTotals.merge(txn.category(), txn.amount(), java.math.BigDecimal::add);
         }
 
+        // Build efficient lookups to avoid O(M * T) nested loops
+        java.util.Map<String, java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn>> acctMonthToTxns = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.Map<String, in.simplifymoney.ledgersync.model.NormalizedTxn> msgIdToTxn = new java.util.concurrent.ConcurrentHashMap<>();
+
+        for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : cleanSqlTxns) {
+            String acct = txn.accountLast4();
+            java.time.YearMonth ym = java.time.YearMonth.from(txn.occurredAt());
+            String key = acct + "|" + ym.toString();
+            acctMonthToTxns.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(txn);
+            
+            for (String msgId : txn.sourceMessageIds()) {
+                msgIdToTxn.put(msgId, txn);
+            }
+        }
+
+        for (java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> list : acctMonthToTxns.values()) {
+            list.sort(java.util.Comparator.comparing(in.simplifymoney.ledgersync.model.NormalizedTxn::occurredAt).reversed());
+        }
+
         // Parallelize Q1: forAccountMonth to bypass N+1 network bottleneck
         System.out.println("Checking Q1 (forAccountMonth) concurrently...");
         accountMonths.entrySet().parallelStream().forEach(entry -> {
             String acct = entry.getKey();
             for (java.time.YearMonth ym : entry.getValue()) {
-                java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> sqlList = cleanSqlTxns.stream()
-                        .filter(t -> t.accountLast4().equals(acct) && java.time.YearMonth.from(t.occurredAt()).equals(ym))
-                        .sorted(java.util.Comparator.comparing(in.simplifymoney.ledgersync.model.NormalizedTxn::occurredAt).reversed())
-                        .toList();
+                String key = acct + "|" + ym.toString();
+                java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> sqlList = acctMonthToTxns.getOrDefault(key, java.util.Collections.emptyList());
                 
                 java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> docList = documents.forAccountMonth(acct, ym);
                 
@@ -99,9 +116,7 @@ public final class ConsistencyChecker {
         // Parallelize Q3: byMessageId
         System.out.println("Checking Q3 (byMessageId) concurrently...");
         allMsgIds.parallelStream().forEach(msgId -> {
-            in.simplifymoney.ledgersync.model.NormalizedTxn sTxn = cleanSqlTxns.stream()
-                    .filter(t -> t.sourceMessageIds().contains(msgId))
-                    .findFirst().orElse(null);
+            in.simplifymoney.ledgersync.model.NormalizedTxn sTxn = msgIdToTxn.get(msgId);
             in.simplifymoney.ledgersync.model.NormalizedTxn dTxn = documents.byMessageId(msgId).orElse(null);
             
             if (sTxn != null && dTxn == null) {

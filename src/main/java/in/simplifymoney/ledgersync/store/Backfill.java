@@ -46,7 +46,7 @@ public final class Backfill {
                 }
 
                 // Deduplicate items to handle dirty SQL store
-                String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt() + "|" + txn.direction() + "|" + txn.amount();
+                String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
                 if (!seen.add(deduplicationKey)) {
                     skipped.incrementAndGet();
                     return;
