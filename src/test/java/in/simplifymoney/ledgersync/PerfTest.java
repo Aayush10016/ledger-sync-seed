@@ -22,8 +22,7 @@ public class PerfTest {
                 .endpointOverride(URI.create("http://localhost:8000"))
                 .build();
         
-        DynamoDbLedgerStore store = new DynamoDbLedgerStore(client, "ledger_perf");
-        store.init(); // Creates the table if not exists
+        DynamoDbLedgerStore store = new DynamoDbLedgerStore(client);
 
         System.out.println("Inserting 100,000 records (this will take a moment)...");
         
