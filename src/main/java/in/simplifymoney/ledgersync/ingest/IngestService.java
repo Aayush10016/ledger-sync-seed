@@ -159,6 +159,12 @@ public final class IngestService {
         }
 
         // Identify TRANSFER
+        categorizeTransfers(out);
+        
+        return out;
+    }
+
+    static void categorizeTransfers(List<NormalizedTxn> out) {
         for (int i = 0; i < out.size(); i++) {
             NormalizedTxn t1 = out.get(i);
             if (t1.category() == Category.TRANSFER) continue;
@@ -180,7 +186,6 @@ public final class IngestService {
                 }
             }
         }
-        return out;
     }
 
     private Category determineCategory(ParsedTxn p) {
@@ -198,7 +203,7 @@ public final class IngestService {
         return p.merchant() != null && p.merchant().toUpperCase().contains("UPI");
     }
 
-    private NormalizedTxn withCategory(NormalizedTxn t, Category c) {
+    static NormalizedTxn withCategory(NormalizedTxn t, Category c) {
         return new NormalizedTxn(t.accountLast4(), t.occurredAt(), t.direction(),
                 t.amount(), c, t.merchant(), t.sourceMessageIds());
     }

@@ -36,27 +36,36 @@ public final class Backfill {
 
         try {
             List<NormalizedTxn> allTxns = source.all();
-            Set<String> seen = ConcurrentHashMap.newKeySet();
+            java.util.Map<String, NormalizedTxn> deduplicatedTxns = new ConcurrentHashMap<>();
 
-            // Parallelize network-bound insertion to maximize throughput
+            // Deduplicate items to handle dirty SQL store and merge message IDs
             allTxns.parallelStream().forEach(txn -> {
                 long currentRead = read.incrementAndGet();
                 if (currentRead % 100 == 0) {
-                    System.out.println("Backfill Progress: " + currentRead + " / " + allTxns.size());
+                    System.out.println("Backfill Read Progress: " + currentRead + " / " + allTxns.size());
                 }
 
-                // Deduplicate items to handle dirty SQL store
                 String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
-                if (!seen.add(deduplicationKey)) {
+                
+                deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                     skipped.incrementAndGet();
-                    return;
-                }
+                    java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
+                    mergedIds.addAll(incoming.sourceMessageIds());
+                    return new NormalizedTxn(
+                        existing.accountLast4(), existing.occurredAt(), existing.direction(),
+                        existing.amount(), existing.category(), existing.merchant(),
+                        new java.util.ArrayList<>(mergedIds)
+                    );
+                });
+            });
 
+            // Parallelize network-bound insertion to maximize throughput
+            deduplicatedTxns.values().parallelStream().forEach(txn -> {
                 try {
                     target.save(txn);
                     written.incrementAndGet();
                 } catch (Exception e) {
-                    System.err.println("Failed to insert transaction " + deduplicationKey + " - " + e.getMessage());
+                    System.err.println("Failed to insert transaction - " + e.getMessage());
                     failed.incrementAndGet();
                 }
             });

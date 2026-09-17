@@ -36,14 +36,20 @@ public final class ConsistencyChecker {
         // 1. Gather all data from SQL
         java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> allSqlTxns = sql.all();
         // SQL store is dirty, we need to deduplicate it first exactly as backfill does
-        java.util.Set<String> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> cleanSqlTxns = new java.util.ArrayList<>();
+        java.util.Map<String, in.simplifymoney.ledgersync.model.NormalizedTxn> deduplicatedTxns = new java.util.LinkedHashMap<>();
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : allSqlTxns) {
             String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
-            if (seen.add(deduplicationKey)) {
-                cleanSqlTxns.add(txn);
-            }
+            deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
+                java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
+                mergedIds.addAll(incoming.sourceMessageIds());
+                return new in.simplifymoney.ledgersync.model.NormalizedTxn(
+                    existing.accountLast4(), existing.occurredAt(), existing.direction(),
+                    existing.amount(), existing.category(), existing.merchant(),
+                    new java.util.ArrayList<>(mergedIds)
+                );
+            });
         }
+        java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> cleanSqlTxns = new java.util.ArrayList<>(deduplicatedTxns.values());
 
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : cleanSqlTxns) {
             String acct = txn.accountLast4();
@@ -99,11 +105,16 @@ public final class ConsistencyChecker {
             }
         });
 
-        // Parallelize Q2: categoryTotals
-        System.out.println("Checking Q2 (categoryTotals) concurrently...");
-        allAccounts.parallelStream().forEach(acct -> {
-            java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> sTot = sqlTotals.get(acct);
+        // Parallelize Q2: categoryTotals for ALL 10,000 possible accounts to catch ghost records
+        System.out.println("Checking Q2 (categoryTotals) for all possible accounts...");
+        java.util.stream.IntStream.range(0, 10000).parallel().forEach(i -> {
+            String acct = String.format("%04d", i);
+            java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> sTot = sqlTotals.getOrDefault(acct, new java.util.concurrent.ConcurrentHashMap<>());
             java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> dTot = documents.categoryTotals(acct);
+            
+            // If both are empty, skip
+            if (sTot.isEmpty() && dTot.isEmpty()) return;
+
             for (in.simplifymoney.ledgersync.model.Category cat : in.simplifymoney.ledgersync.model.Category.values()) {
                 java.math.BigDecimal s = sTot.getOrDefault(cat, java.math.BigDecimal.ZERO);
                 java.math.BigDecimal d = dTot.getOrDefault(cat, java.math.BigDecimal.ZERO);
