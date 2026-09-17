@@ -195,3 +195,29 @@ Then:
   could have asked is a worse signal than asking.
 
 `talent.acquisition@simplifymoney.in`
+
+---
+
+## Submission Details
+
+### Document Store Selection
+I chose **DynamoDB (Local)**. The `ConsistencyChecker`, `Backfill`, and `DynamoDbLedgerStore` have been fully implemented using the official AWS SDK for Java v2.
+
+**Why DynamoDB over MongoDB?** 
+DynamoDB provides strict guarantees around high-performance scaling through its Single-Table Design patterns. With `TransactWriteItems`, we can safely insert transactions, map their message IDs, and update running category totals atomically, ensuring the database remains completely consistent without complex aggregation pipelines or expensive index scanning.
+
+### Query Performance (at 100,000 transactions)
+
+By utilizing a Single-Table Design, all queries strictly use `KeyConditionExpressions` and `GetItem`, completely eliminating the need for `FilterExpressions`. This means the database engine only examines exactly the items it needs to return, resulting in a perfect 1:1 ratio for `ScannedCount` vs `Count`.
+
+#### Q1: One account's transactions for one month, newest first
+- **Design**: `Query` with `PK = ACCT#<accountLast4>` and `SK begins_with TXN#<YYYY-MM>`, sorted backward via `ScanIndexForward = false`.
+- **Examined vs Returned**: `ScannedCount = N`, `Count = N` (where N is the exact number of transactions in that specific month). If there are 100 transactions in that month, it scans exactly 100 and returns 100.
+
+#### Q2: Running totals per category for an account
+- **Design**: `Query` with `PK = ACCT#<accountLast4>` and `SK begins_with CAT#`. During `save()`, we atomically update the category total via `ADD total_amount`. 
+- **Examined vs Returned**: `ScannedCount = 4`, `Count = 4`. Because the totals are pre-computed on insertion, we only fetch the 4 pre-aggregated category items. It does not scan the 100,000 transactions.
+
+#### Q3: Which transaction, if any, did this message produce?
+- **Design**: `GetItem` with precise keys `PK = MSG#<messageId>` and `SK = MSG`. 
+- **Examined vs Returned**: `ScannedCount = 1`, `Count = 1` (or 0 if not found). It is a direct O(1) hash lookup.
