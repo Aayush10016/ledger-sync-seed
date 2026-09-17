@@ -1,4 +1,4 @@
--- Rows written by the service before anyone was checking. Left here on purpose:
+﻿-- Rows written by the service before anyone was checking. Left here on purpose:
 -- this is the state of production.
 INSERT INTO ledger (account_last4, occurred_at, direction, amount, category, merchant, source_message_ids) VALUES
 ('4821','2026-06-28T11:04+05:30','DEBIT',  449.00,'SPEND','SWIGGY','m-legacy-0001'),

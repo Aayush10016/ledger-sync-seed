@@ -36,6 +36,11 @@ public final class IngestService {
         this.store = store;
     }
 
+    private static String generateDedupKey(String accountLast4, OffsetDateTime occurredAt, Direction direction, java.math.BigDecimal amount, String merchant) {
+        String m = merchant == null ? "" : merchant.trim().toLowerCase();
+        return accountLast4 + "|" + occurredAt.toEpochSecond() + "|" + direction.name() + "|" + amount.toPlainString() + "|" + m;
+    }
+
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
         List<ParsedTxn> parsedTxns = new ArrayList<>();
@@ -59,14 +64,14 @@ public final class IngestService {
         List<NormalizedTxn> existingTxns = store.all();
         java.util.Map<String, java.util.Set<String>> existingKeysToMsgIds = new java.util.HashMap<>();
         for (NormalizedTxn e : existingTxns) {
-            String key = e.accountLast4() + "|" + e.occurredAt().toEpochSecond() + "|" + e.direction() + "|" + e.amount();
+            String key = generateDedupKey(e.accountLast4(), e.occurredAt(), e.direction(), e.amount(), e.merchant());
             existingKeysToMsgIds.computeIfAbsent(key, k -> new java.util.HashSet<>()).addAll(e.sourceMessageIds());
         }
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
         int written = 0;
         for (NormalizedTxn t : txns) {
-            String key = t.accountLast4() + "|" + t.occurredAt().toEpochSecond() + "|" + t.direction() + "|" + t.amount();
+            String key = generateDedupKey(t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), t.merchant());
             java.util.Set<String> existingIds = existingKeysToMsgIds.get(key);
             
             if (existingIds == null) {
@@ -125,7 +130,7 @@ public final class IngestService {
         // Deduplicate
         Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
         for (ParsedTxn p : parsed) {
-            String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction() + "|" + p.amount();
+            String key = generateDedupKey(p.accountLast4(), p.occurredAt(), p.direction(), p.amount(), p.merchant());
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
         }
 

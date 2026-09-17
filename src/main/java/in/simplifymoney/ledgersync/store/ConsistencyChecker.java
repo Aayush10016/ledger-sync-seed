@@ -75,7 +75,10 @@ public final class ConsistencyChecker {
             acctMonthToTxns.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(txn);
             
             for (String msgId : txn.sourceMessageIds()) {
-                msgIdToTxn.put(msgId, txn);
+                in.simplifymoney.ledgersync.model.NormalizedTxn existing = msgIdToTxn.putIfAbsent(msgId, txn);
+                if (existing != null && !existing.equals(txn)) {
+                    out.add(new Divergence("Duplicate message ID in SQL: " + msgId, existing.toString(), txn.toString()));
+                }
             }
         }
 

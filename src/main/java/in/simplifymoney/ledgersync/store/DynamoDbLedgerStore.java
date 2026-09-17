@@ -109,7 +109,19 @@ public class DynamoDbLedgerStore implements DocumentStore {
         System.out.println("byMessageId - Item found: " + res.hasItem());
 
         if (res.hasItem()) {
-            return Optional.of(deserialize(res.item()));
+            Map<String, AttributeValue> item = res.item();
+            if (item.containsKey("targetPk") && item.containsKey("targetSk")) {
+                GetItemResponse targetRes = client.getItem(GetItemRequest.builder()
+                        .tableName(tableName)
+                        .key(Map.of("PK", item.get("targetPk"), "SK", item.get("targetSk")))
+                        .build());
+                if (targetRes.hasItem()) {
+                    return Optional.of(deserialize(targetRes.item()));
+                }
+                return Optional.empty(); // Pointer exists but target is missing
+            }
+            // Legacy fallback for old records
+            return Optional.of(deserialize(item));
         }
         return Optional.empty();
     }
@@ -119,7 +131,8 @@ public class DynamoDbLedgerStore implements DocumentStore {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();
         // Deterministic SK based on transaction attributes ensures true idempotency for retries
-        String hash = String.valueOf(Math.abs(Objects.hash(txn.direction(), txn.amount())));
+        String merchantComponent = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
+        String hash = String.valueOf(Math.abs(Objects.hash(txn.direction(), txn.amount(), merchantComponent)));
         String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + hash;
 
         Map<String, AttributeValue> item = new HashMap<>();
@@ -151,9 +164,11 @@ public class DynamoDbLedgerStore implements DocumentStore {
             List<TransactWriteItem> writeItems = new ArrayList<>();
             for (String msgId : txn.sourceMessageIds()) {
                 if (!existingIds.contains(msgId)) {
-                    Map<String, AttributeValue> msgItem = new HashMap<>(item);
+                    Map<String, AttributeValue> msgItem = new HashMap<>();
                     msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
                     msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+                    msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
+                    msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
                     writeItems.add(TransactWriteItem.builder()
                             .put(Put.builder()
                                     .tableName(tableName)
@@ -225,9 +240,11 @@ public class DynamoDbLedgerStore implements DocumentStore {
 
         // Message Indices
         for (String msgId : txn.sourceMessageIds()) {
-            Map<String, AttributeValue> msgItem = new HashMap<>(item);
+            Map<String, AttributeValue> msgItem = new HashMap<>();
             msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
             msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+            msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
+            msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
             writeItems.add(TransactWriteItem.builder()
                     .put(Put.builder()
                             .tableName(tableName)

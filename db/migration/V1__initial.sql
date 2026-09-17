@@ -1,4 +1,4 @@
--- The ledger, as originally written.
+﻿-- The ledger, as originally written.
 CREATE TABLE IF NOT EXISTS ledger (
     id                 IDENTITY PRIMARY KEY,
     account_last4      VARCHAR(4)     NOT NULL,

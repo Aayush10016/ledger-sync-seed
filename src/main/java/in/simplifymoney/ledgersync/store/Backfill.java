@@ -45,7 +45,8 @@ public final class Backfill {
                     System.out.println("Backfill Read Progress: " + currentRead + " / " + allTxns.size());
                 }
 
-                String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
+                String merchant = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
+                String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount() + "|" + merchant;
                 
                 deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                     skipped.incrementAndGet();
@@ -72,12 +73,15 @@ public final class Backfill {
 
             System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
                     + ", Skipped: " + skipped.get() + ", Failed: " + failed.get());
-            return new Result(read.get(), written.get(), skipped.get());
+            if (failed.get() > 0) {
+                throw new IllegalStateException("Backfill completed with " + failed.get() + " failures. Check logs for details.");
+            }
+            return new Result(read.get(), written.get(), skipped.get(), failed.get());
         } catch (Exception e) {
             e.printStackTrace();
             throw new RuntimeException("Backfill failed critically", e);
         }
     }
 
-    public record Result(long read, long written, long skipped) {}
+    public record Result(long read, long written, long skipped, long failed) {}
 }
