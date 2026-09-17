@@ -42,12 +42,17 @@ public final class IngestService {
         int skipped = 0;
         
         for (RawMessage m : messages) {
-            Optional<ParsedTxn> p = parsers.parse(m);
-            if (p.isEmpty()) {
+            try {
+                Optional<ParsedTxn> p = parsers.parse(m);
+                if (p.isEmpty()) {
+                    skipped++;
+                    continue;
+                }
+                parsedTxns.add(p.get());
+            } catch (Exception e) {
+                System.err.println("Failed to parse message ID " + m.messageId() + ": " + e.getMessage());
                 skipped++;
-                continue;
             }
-            parsedTxns.add(p.get());
         }
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
@@ -76,16 +81,37 @@ public final class IngestService {
     }
 
     private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed) {
-        // Deduplicate
-        Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
+        // Production-grade deduplication using a 2-minute sliding window
+        // (Handles slight time drifts between SMS and Email for the same transaction)
+        parsed.sort(java.util.Comparator.comparing(ParsedTxn::occurredAt));
+        List<List<ParsedTxn>> groups = new ArrayList<>();
+        
         for (ParsedTxn p : parsed) {
-            String key = p.accountLast4() + "|" + p.occurredAt() + "|" + p.direction() + "|" + p.amount();
-            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
+            boolean matched = false;
+            for (List<ParsedTxn> group : groups) {
+                ParsedTxn first = group.get(0);
+                if (first.accountLast4().equals(p.accountLast4()) &&
+                    first.direction() == p.direction() &&
+                    first.amount().compareTo(p.amount()) == 0) {
+                    
+                    long diffSeconds = Math.abs(first.occurredAt().toEpochSecond() - p.occurredAt().toEpochSecond());
+                    if (diffSeconds <= 120) { // 2-minute window
+                        group.add(p);
+                        matched = true;
+                        break;
+                    }
+                }
+            }
+            if (!matched) {
+                List<ParsedTxn> newGroup = new ArrayList<>();
+                newGroup.add(p);
+                groups.add(newGroup);
+            }
         }
 
         List<ParsedTxn> uniqueParsed = new ArrayList<>();
         List<NormalizedTxn> out = new ArrayList<>();
-        for (List<ParsedTxn> group : groups.values()) {
+        for (List<ParsedTxn> group : groups) {
             ParsedTxn first = group.get(0);
             uniqueParsed.add(first);
             List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).toList();

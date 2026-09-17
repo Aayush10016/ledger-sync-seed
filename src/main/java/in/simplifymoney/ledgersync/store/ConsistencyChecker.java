@@ -1,6 +1,8 @@
 package in.simplifymoney.ledgersync.store;
 
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
 
 /**
  * Proves the two stores agree, and says precisely where they do not.
@@ -22,19 +24,19 @@ public final class ConsistencyChecker {
     }
 
     public List<Divergence> check() {
-        System.out.println("Starting Consistency Check...");
-        List<Divergence> out = new java.util.ArrayList<>();
+        System.out.println("Starting High-Performance Consistency Check...");
+        List<Divergence> out = new CopyOnWriteArrayList<>();
         
-        java.util.Map<String, java.util.Set<java.time.YearMonth>> accountMonths = new java.util.HashMap<>();
-        java.util.Set<String> allAccounts = new java.util.HashSet<>();
-        java.util.Set<String> allMsgIds = new java.util.HashSet<>();
+        java.util.Map<String, java.util.Set<java.time.YearMonth>> accountMonths = new java.util.concurrent.ConcurrentHashMap<>();
+        java.util.Set<String> allAccounts = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        java.util.Set<String> allMsgIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
         
-        java.util.Map<String, java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal>> sqlTotals = new java.util.HashMap<>();
+        java.util.Map<String, java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal>> sqlTotals = new java.util.concurrent.ConcurrentHashMap<>();
 
         // 1. Gather all data from SQL
         java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> allSqlTxns = sql.all();
         // SQL store is dirty, we need to deduplicate it first exactly as backfill does
-        java.util.Set<String> seen = new java.util.HashSet<>();
+        java.util.Set<String> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
         java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> cleanSqlTxns = new java.util.ArrayList<>();
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : allSqlTxns) {
             String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt() + "|" + txn.direction() + "|" + txn.amount();
@@ -46,18 +48,19 @@ public final class ConsistencyChecker {
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : cleanSqlTxns) {
             String acct = txn.accountLast4();
             allAccounts.add(acct);
-            accountMonths.computeIfAbsent(acct, k -> new java.util.HashSet<>())
+            accountMonths.computeIfAbsent(acct, k -> java.util.concurrent.ConcurrentHashMap.newKeySet())
                          .add(java.time.YearMonth.from(txn.occurredAt()));
             
             allMsgIds.addAll(txn.sourceMessageIds());
             
             java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> acctTotals = 
-                sqlTotals.computeIfAbsent(acct, k -> new java.util.HashMap<>());
-            acctTotals.put(txn.category(), acctTotals.getOrDefault(txn.category(), java.math.BigDecimal.ZERO).add(txn.amount()));
+                sqlTotals.computeIfAbsent(acct, k -> new java.util.concurrent.ConcurrentHashMap<>());
+            acctTotals.merge(txn.category(), txn.amount(), java.math.BigDecimal::add);
         }
 
-        // Q1: forAccountMonth
-        for (java.util.Map.Entry<String, java.util.Set<java.time.YearMonth>> entry : accountMonths.entrySet()) {
+        // Parallelize Q1: forAccountMonth to bypass N+1 network bottleneck
+        System.out.println("Checking Q1 (forAccountMonth) concurrently...");
+        accountMonths.entrySet().parallelStream().forEach(entry -> {
             String acct = entry.getKey();
             for (java.time.YearMonth ym : entry.getValue()) {
                 java.util.List<in.simplifymoney.ledgersync.model.NormalizedTxn> sqlList = cleanSqlTxns.stream()
@@ -77,24 +80,25 @@ public final class ConsistencyChecker {
                     }
                 }
             }
-        }
+        });
 
-        // Q2: categoryTotals
-        for (String acct : allAccounts) {
+        // Parallelize Q2: categoryTotals
+        System.out.println("Checking Q2 (categoryTotals) concurrently...");
+        allAccounts.parallelStream().forEach(acct -> {
             java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> sTot = sqlTotals.get(acct);
             java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> dTot = documents.categoryTotals(acct);
             for (in.simplifymoney.ledgersync.model.Category cat : in.simplifymoney.ledgersync.model.Category.values()) {
                 java.math.BigDecimal s = sTot.getOrDefault(cat, java.math.BigDecimal.ZERO);
                 java.math.BigDecimal d = dTot.getOrDefault(cat, java.math.BigDecimal.ZERO);
-                // In DynamoDB we stored it exactly, but let's safely compare
                 if (s.compareTo(d) != 0) {
                     out.add(new Divergence("categoryTotals " + acct + " " + cat, s.toPlainString(), d.toPlainString()));
                 }
             }
-        }
+        });
 
-        // Q3: byMessageId
-        for (String msgId : allMsgIds) {
+        // Parallelize Q3: byMessageId
+        System.out.println("Checking Q3 (byMessageId) concurrently...");
+        allMsgIds.parallelStream().forEach(msgId -> {
             in.simplifymoney.ledgersync.model.NormalizedTxn sTxn = cleanSqlTxns.stream()
                     .filter(t -> t.sourceMessageIds().contains(msgId))
                     .findFirst().orElse(null);
@@ -107,12 +111,13 @@ public final class ConsistencyChecker {
             } else if (sTxn != null && dTxn != null && !sTxn.equals(dTxn)) {
                 out.add(new Divergence("byMessageId " + msgId, sTxn.toString(), dTxn.toString()));
             }
-        }
+        });
 
         System.out.println("Consistency Check complete. Found " + out.size() + " divergences.");
-        return out;
+        return new java.util.ArrayList<>(out);
     }
 
     /** One place the two stores disagree. */
     public record Divergence(String what, String inSql, String inDocuments) {}
 }
+

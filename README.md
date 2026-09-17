@@ -221,3 +221,25 @@ By utilizing a Single-Table Design, all queries strictly use `KeyConditionExpres
 #### Q3: Which transaction, if any, did this message produce?
 - **Design**: `GetItem` with precise keys `PK = MSG#<messageId>` and `SK = MSG`. 
 - **Examined vs Returned**: `ScannedCount = 1`, `Count = 1` (or 0 if not found). It is a direct O(1) hash lookup.
+
+### Decision Log
+
+1. **Parallel Stream Optimizations for N+1 Queries** 
+   - *Decision:* Used `parallelStream()` and thread-safe collections (`ConcurrentHashMap`, `CopyOnWriteArrayList`, `AtomicLong`) in `ConsistencyChecker` and `Backfill`.
+   - *Why:* The `DocumentStore` interface restricts data fetching to individual queries (e.g., `byMessageId`, `forAccountMonth`). Iterating sequentially over 100,000 transactions would result in an extreme N+1 query bottleneck causing the verification to take several minutes. Concurrency maximizes DynamoDB's high throughput capabilities, drastically reducing runtime without altering the frozen interface.
+
+2. **Deduplication Sliding Window vs Exact Match**
+   - *Decision:* Shifted `IngestService` deduplication from exact timestamp matching to a 2-minute sliding window.
+   - *Why:* Real-world banking alerts often experience slight delivery delays. An SMS and an Email for the same physical transaction might arrive seconds or minutes apart. Grouping them by a time window (alongside identical account, direction, and amount) prevents duplicate ledger entries in production.
+
+3. **Bi-Directional Consistency Verification**
+   - *Decision:* Implemented a strict size and element-wise comparison between the `sqlList` and `docList` in `ConsistencyChecker`.
+   - *Why:* Rather than merely checking if SQL items exist in DynamoDB, it is critical to verify DynamoDB didn't erroneously create "ghost" transactions. By comparing the size and equality of the lists for each `Account/Month`, we implicitly prove that DynamoDB contains no rogue records for those periods.
+
+4. **Resilient Ingestion Parsing**
+   - *Decision:* Wrapped parser execution in `IngestService` with a broad `try/catch` and skipped-counter increment.
+   - *Why:* A single malformed message from a host API should not crash the entire batch ingestion pipeline.
+
+5. **Idempotency in Backfill**
+   - *Decision:* Leveraged DynamoDB's `TransactWriteItems` condition failures.
+   - *Why:* If the `Backfill` job fails partially and is restarted, we rely on DynamoDB transactions natively failing their conditions for already-processed items. This is handled gracefully inside `DynamoDbLedgerStore`, preventing duplicate creation while correctly resuming progress.

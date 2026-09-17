@@ -1,5 +1,12 @@
 package in.simplifymoney.ledgersync.store;
 
+import in.simplifymoney.ledgersync.model.NormalizedTxn;
+
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Moves everything already in the SQL store into the document store.
  *
@@ -21,30 +28,45 @@ public final class Backfill {
     }
 
     public Result run() {
-        System.out.println("Starting Backfill...");
-        long read = 0;
-        long written = 0;
-        long skipped = 0;
+        System.out.println("Starting High-Performance Backfill...");
+        AtomicLong read = new AtomicLong(0);
+        AtomicLong written = new AtomicLong(0);
+        AtomicLong skipped = new AtomicLong(0);
+        AtomicLong failed = new AtomicLong(0);
 
         try {
-            java.util.Set<String> seen = new java.util.HashSet<>();
-            for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : source.all()) {
-                read++;
+            List<NormalizedTxn> allTxns = source.all();
+            Set<String> seen = ConcurrentHashMap.newKeySet();
+
+            // Parallelize network-bound insertion to maximize throughput
+            allTxns.parallelStream().forEach(txn -> {
+                long currentRead = read.incrementAndGet();
+                if (currentRead % 100 == 0) {
+                    System.out.println("Backfill Progress: " + currentRead + " / " + allTxns.size());
+                }
+
                 // Deduplicate items to handle dirty SQL store
                 String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt() + "|" + txn.direction() + "|" + txn.amount();
                 if (!seen.add(deduplicationKey)) {
-                    skipped++;
-                    continue;
+                    skipped.incrementAndGet();
+                    return;
                 }
-                
-                target.save(txn);
-                written++;
-            }
-            System.out.println("Backfill complete. Read: " + read + ", Written: " + written + ", Skipped: " + skipped);
-            return new Result(read, written, skipped);
+
+                try {
+                    target.save(txn);
+                    written.incrementAndGet();
+                } catch (Exception e) {
+                    System.err.println("Failed to insert transaction " + deduplicationKey + " - " + e.getMessage());
+                    failed.incrementAndGet();
+                }
+            });
+
+            System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
+                    + ", Skipped: " + skipped.get() + ", Failed: " + failed.get());
+            return new Result(read.get(), written.get(), skipped.get());
         } catch (Exception e) {
             e.printStackTrace();
-            throw new RuntimeException("Backfill failed", e);
+            throw new RuntimeException("Backfill failed critically", e);
         }
     }
 
