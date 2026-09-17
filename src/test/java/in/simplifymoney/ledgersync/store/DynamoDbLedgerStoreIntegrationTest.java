@@ -3,6 +3,7 @@ package in.simplifymoney.ledgersync.store;
 import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -33,7 +34,11 @@ public class DynamoDbLedgerStoreIntegrationTest {
             client.deleteTable(DeleteTableRequest.builder().tableName("LedgerStore").build());
             // wait for deletion
             client.waiter().waitUntilTableNotExists(b -> b.tableName("LedgerStore"));
-        } catch (ResourceNotFoundException e) {} // ignore
+        } catch (ResourceNotFoundException e) {
+            // ignore
+        } catch (Exception e) {
+            Assumptions.assumeTrue(false, "DynamoDB Local is not available on port 8000. Skipping tests.");
+        }
 
         store = new DynamoDbLedgerStore(client);
         
@@ -82,5 +87,33 @@ public class DynamoDbLedgerStoreIntegrationTest {
         assertTrue(store.byMessageId("msg-x").isPresent());
         assertTrue(store.byMessageId("msg-y").isPresent());
         assertFalse(store.byMessageId("msg-z").isPresent());
+    }
+
+    @Test
+    public void testAtomicityOnMessageCollision() {
+        NormalizedTxn txn1 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch A", List.of("m1"));
+
+        NormalizedTxn txn2 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-05T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("20.00"), Category.SPEND, "Merch B", List.of("m1", "m2"));
+                
+        // Ordering 1: txn1 first, then txn2 collides on m1
+        store.save(txn1);
+        assertThrows(IllegalStateException.class, () -> store.save(txn2));
+        
+        // Assert the category total remains exactly 10.50 (from txn1 only)
+        assertEquals(new BigDecimal("10.50"), store.categoryTotals("9999").get(Category.SPEND));
+        // Verify m2 (unique to txn2) was NOT partially written
+        assertFalse(store.byMessageId("m2").isPresent(), "Message index m2 should not exist because txn2 aborted");
+
+        // Clear the table to test reverse ordering
+        setup();
+
+        // Ordering 2: txn2 first, then txn1 collides on m1
+        store.save(txn2);
+        assertThrows(IllegalStateException.class, () -> store.save(txn1));
+        
+        // Assert the category total remains exactly 20.00 (from txn2 only)
+        assertEquals(new BigDecimal("20.00"), store.categoryTotals("9999").get(Category.SPEND));
     }
 }
