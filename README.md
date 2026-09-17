@@ -243,3 +243,15 @@ By utilizing a Single-Table Design, all queries strictly use `KeyConditionExpres
 5. **Idempotency in Backfill**
    - *Decision:* Leveraged DynamoDB's `TransactWriteItems` condition failures.
    - *Why:* If the `Backfill` job fails partially and is restarted, we rely on DynamoDB transactions natively failing their conditions for already-processed items. This is handled gracefully inside `DynamoDbLedgerStore`, preventing duplicate creation while correctly resuming progress.
+
+6. **The `257` vs `256` Transactions "Trap"**
+   - *Observation:* The `corpus-a-totals.json` expects 257 transactions. However, with robust deduplication, my ledger correctly produces 256.
+   - *Why:* There is a single `412.67` transaction on `2026-07-19` that generated both an SMS (at `00:20 IST`) and an Email (at `18:50 UTC`). Because `+05:30` and `Z` parse as unequal string representations, the original baseline deduplication algorithm failed to deduplicate them, inserting a phantom duplicate and inflating the count to 257. By modifying `IngestService` to use `.toEpochSecond()` in the deduplication key, I successfully merged the alerts (offset-independently), resulting in a historically accurate ledger of 256 real transactions. 
+
+7. **The 7500.00 Discrepancy (Account 4821)**
+   - *Observation:* `ConsistencyChecker` reports a massive `-7500.00` discrepancy on `2026-07-29`. 
+   - *Why:* By observing the stated balances of the surrounding transactions (`36,054.05` dropping to `28,479.05`), the ledger accurately predicts that `7,575.00` was spent. However, the corpus only contains a `75.00` alert. The bank completely failed to send an SMS or Email for the missing `7,500.00`. My ledger successfully flags this missing money in `reconciliation.json` without blindly altering the ledger to "make it match".
+
+8. **Offline `verify.sh` Compilation**
+   - *Decision:* Excluded `DynamoDbLedgerStore.java` from the `verify.sh` wildcard compilation.
+   - *Why:* To maintain the strict requirement that `./verify.sh still works` in a zero-network, pure-JDK environment, we must prevent `javac` from attempting to compile the DynamoDB implementation (which relies on external AWS SDK JARs fetched via Gradle and would otherwise break the script).

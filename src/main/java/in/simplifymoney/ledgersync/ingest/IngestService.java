@@ -45,6 +45,7 @@ public final class IngestService {
             try {
                 Optional<ParsedTxn> p = parsers.parse(m);
                 if (p.isEmpty()) {
+                    System.err.println("SKIPPED: " + m.body());
                     skipped++;
                     continue;
                 }
@@ -81,37 +82,16 @@ public final class IngestService {
     }
 
     private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed) {
-        // Production-grade deduplication using a 2-minute sliding window
-        // (Handles slight time drifts between SMS and Email for the same transaction)
-        parsed.sort(java.util.Comparator.comparing(ParsedTxn::occurredAt));
-        List<List<ParsedTxn>> groups = new ArrayList<>();
-        
+        // Deduplicate
+        Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
         for (ParsedTxn p : parsed) {
-            boolean matched = false;
-            for (List<ParsedTxn> group : groups) {
-                ParsedTxn first = group.get(0);
-                if (first.accountLast4().equals(p.accountLast4()) &&
-                    first.direction() == p.direction() &&
-                    first.amount().compareTo(p.amount()) == 0) {
-                    
-                    long diffSeconds = Math.abs(first.occurredAt().toEpochSecond() - p.occurredAt().toEpochSecond());
-                    if (diffSeconds <= 120) { // 2-minute window
-                        group.add(p);
-                        matched = true;
-                        break;
-                    }
-                }
-            }
-            if (!matched) {
-                List<ParsedTxn> newGroup = new ArrayList<>();
-                newGroup.add(p);
-                groups.add(newGroup);
-            }
+            String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction() + "|" + p.amount();
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
         }
 
         List<ParsedTxn> uniqueParsed = new ArrayList<>();
         List<NormalizedTxn> out = new ArrayList<>();
-        for (List<ParsedTxn> group : groups) {
+        for (List<ParsedTxn> group : groups.values()) {
             ParsedTxn first = group.get(0);
             uniqueParsed.add(first);
             List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).toList();
