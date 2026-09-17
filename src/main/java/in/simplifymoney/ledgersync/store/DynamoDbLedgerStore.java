@@ -84,7 +84,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
         Map<Category, BigDecimal> out = new LinkedHashMap<>();
         for (Map<String, AttributeValue> item : res.items()) {
             String catStr = item.get("SK").s().substring(4); // Remove "CAT#"
-            BigDecimal total = new BigDecimal(item.get("total_amount").s());
+            BigDecimal total = new BigDecimal(item.get("total_amount").n());
             out.put(Category.valueOf(catStr), total);
         }
         return out;
@@ -138,7 +138,11 @@ public class DynamoDbLedgerStore implements DocumentStore {
 
         List<TransactWriteItem> writeItems = new ArrayList<>();
         writeItems.add(TransactWriteItem.builder()
-                .put(Put.builder().tableName(tableName).item(item).build())
+                .put(Put.builder()
+                        .tableName(tableName)
+                        .item(item)
+                        .conditionExpression("attribute_not_exists(PK)")
+                        .build())
                 .build());
 
         // Update Category Total
@@ -167,8 +171,16 @@ public class DynamoDbLedgerStore implements DocumentStore {
                     .build());
         }
 
-        // Limit is 100 per TransactWriteItems, but this is at most 1 (Txn) + 1 (Cat) + N (Msgs) which is small.
-        client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
+        try {
+            client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
+        } catch (TransactionCanceledException e) {
+            // If the transaction already exists (ConditionCheckFailed), we ignore it safely.
+            if (!e.cancellationReasons().isEmpty() && "ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
+                System.out.println("Transaction already exists, skipping to maintain idempotency.");
+            } else {
+                throw e;
+            }
+        }
     }
 
     private NormalizedTxn deserialize(Map<String, AttributeValue> item) {
