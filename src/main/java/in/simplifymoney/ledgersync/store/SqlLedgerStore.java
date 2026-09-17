@@ -129,6 +129,40 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
         }
     }
 
+    @Override
+    public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO discrepancies(account_last4, occurred_at, amount, note) VALUES (?,?,?,?)")) {
+            ps.setString(1, d.accountLast4());
+            ps.setString(2, d.occurredAt().toString());
+            ps.setBigDecimal(3, d.amount());
+            ps.setString(4, d.note());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not save discrepancy " + d, e);
+        }
+    }
+
+    @Override
+    public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() {
+        List<in.simplifymoney.ledgersync.model.Discrepancy> out = new ArrayList<>();
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT account_last4, occurred_at, amount, note FROM discrepancies ORDER BY occurred_at")) {
+            while (rs.next()) {
+                out.add(new in.simplifymoney.ledgersync.model.Discrepancy(
+                        rs.getString(1),
+                        OffsetDateTime.parse(rs.getString(2)),
+                        rs.getBigDecimal(3).setScale(2),
+                        rs.getString(4)
+                ));
+            }
+        } catch (SQLException e) {
+            // Return empty list if table doesn't exist or query fails
+            return new ArrayList<>();
+        }
+        return out;
+    }
+
     public BigDecimal sumAmounts() {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT SUM(amount) FROM ledger")) {

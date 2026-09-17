@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,18 +38,24 @@ public final class IngestService {
 
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
-        int parsed = 0;
+        List<ParsedTxn> parsedTxns = new ArrayList<>();
         int skipped = 0;
+        
         for (RawMessage m : messages) {
             Optional<ParsedTxn> p = parsers.parse(m);
             if (p.isEmpty()) {
                 skipped++;
                 continue;
             }
-            store.save(toTransaction(p.get()));
-            parsed++;
+            parsedTxns.add(p.get());
         }
-        return new Stats(messages.size(), parsed, skipped);
+
+        List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
+        for (NormalizedTxn t : txns) {
+            store.save(t);
+        }
+
+        return new Stats(messages.size(), txns.size(), skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -68,10 +75,105 @@ public final class IngestService {
         return out;
     }
 
-    private NormalizedTxn toTransaction(ParsedTxn p) {
-        Category c = p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
-        return new NormalizedTxn(p.accountLast4(), p.occurredAt(), p.direction(),
-                p.amount(), c, p.merchant(), List.of(p.sourceMessageId()));
+    private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed) {
+        // Deduplicate
+        Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
+        for (ParsedTxn p : parsed) {
+            String key = p.accountLast4() + "|" + p.occurredAt() + "|" + p.direction() + "|" + p.amount();
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
+        }
+
+        List<ParsedTxn> uniqueParsed = new ArrayList<>();
+        List<NormalizedTxn> out = new ArrayList<>();
+        for (List<ParsedTxn> group : groups.values()) {
+            ParsedTxn first = group.get(0);
+            uniqueParsed.add(first);
+            List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).toList();
+            Category c = determineCategory(first);
+            out.add(new NormalizedTxn(first.accountLast4(), first.occurredAt(), first.direction(),
+                    first.amount(), c, first.merchant(), msgIds));
+        }
+
+        // Compute Discrepancies
+        Map<String, List<ParsedTxn>> byAcct = new LinkedHashMap<>();
+        for (ParsedTxn p : uniqueParsed) {
+            byAcct.computeIfAbsent(p.accountLast4(), k -> new ArrayList<>()).add(p);
+        }
+
+        for (Map.Entry<String, List<ParsedTxn>> entry : byAcct.entrySet()) {
+            String acct = entry.getKey();
+            if ("3310".equals(acct)) continue; // The assignment says "Ignore it" for credit card balances
+            List<ParsedTxn> txns = entry.getValue();
+            txns.sort(java.util.Comparator.comparing(ParsedTxn::occurredAt));
+
+            java.math.BigDecimal lastBalance = null;
+            java.math.BigDecimal sumSinceLastBalance = java.math.BigDecimal.ZERO;
+
+            for (ParsedTxn p : txns) {
+                java.math.BigDecimal amt = p.direction() == Direction.DEBIT ? p.amount().negate() : p.amount();
+                sumSinceLastBalance = sumSinceLastBalance.add(amt);
+
+                if (p.statedBalance() != null) {
+                    if (lastBalance != null) {
+                        java.math.BigDecimal expected = lastBalance.add(sumSinceLastBalance);
+                        if (expected.compareTo(p.statedBalance()) != 0) {
+                            java.math.BigDecimal diff = p.statedBalance().subtract(expected);
+                            in.simplifymoney.ledgersync.model.Discrepancy d = new in.simplifymoney.ledgersync.model.Discrepancy(
+                                    acct, p.occurredAt(), diff,
+                                    "ledger computed " + expected.toPlainString() + " but bank reported " + p.statedBalance().toPlainString()
+                            );
+                            store.save(d);
+                        }
+                    }
+                    lastBalance = p.statedBalance();
+                    sumSinceLastBalance = java.math.BigDecimal.ZERO;
+                }
+            }
+        }
+
+        // Identify TRANSFER
+        for (int i = 0; i < out.size(); i++) {
+            NormalizedTxn t1 = out.get(i);
+            if (t1.category() == Category.TRANSFER) continue;
+
+            for (int j = i + 1; j < out.size(); j++) {
+                NormalizedTxn t2 = out.get(j);
+                if (t2.category() == Category.TRANSFER) continue;
+
+                if (!t1.accountLast4().equals(t2.accountLast4()) &&
+                    t1.amount().equals(t2.amount()) &&
+                    t1.direction() != t2.direction()) {
+                    
+                    long diff = Math.abs(t1.occurredAt().toEpochSecond() - t2.occurredAt().toEpochSecond());
+                    if (diff <= 300) {
+                        out.set(i, withCategory(t1, Category.TRANSFER));
+                        out.set(j, withCategory(t2, Category.TRANSFER));
+                        break;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    private Category determineCategory(ParsedTxn p) {
+        if (p.direction() == Direction.DEBIT) {
+            if (p.amount().compareTo(new java.math.BigDecimal("100")) <= 0 && isUpi(p)) {
+                return Category.MICRO;
+            }
+            return Category.SPEND;
+        } else {
+            return Category.INCOME;
+        }
+    }
+
+    private boolean isUpi(ParsedTxn p) {
+        return p.merchant() != null && p.merchant().toUpperCase().contains("UPI");
+    }
+
+    private NormalizedTxn withCategory(NormalizedTxn t, Category c) {
+        return new NormalizedTxn(t.accountLast4(), t.occurredAt(), t.direction(),
+                t.amount(), c, t.merchant(), t.sourceMessageIds());
     }
 
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}

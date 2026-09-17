@@ -15,5 +15,9 @@ public interface LedgerStore {
 
     List<NormalizedTxn> all();
 
+    void save(in.simplifymoney.ledgersync.model.Discrepancy d);
+
+    List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies();
+
     long count();
 }

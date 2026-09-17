@@ -24,6 +24,11 @@ public final class IciciSmsParser implements MessageParser {
                     + "on (?<when>\\d{2}/\\d{2}/\\d{4} \\d{2}:\\d{2})\\. "
                     + "Info: (?<merchant>[^.]+)\\.");
 
+    private static final Pattern V2 = Pattern.compile(
+            "ICICI Bank Acct XX(?<acct>\\d{4}) (?<dir>Dr|Cr) (?:INR|Rs\\.?)\\s*([0-9,]+(?:\\.[0-9]{2})?) on "
+                    + "(?<when>\\d{2}-[A-Za-z]{3}-\\d{4} \\d{2}:\\d{2}); "
+                    + "(?<merchant>[^.]+?) ref no");
+
     @Override
     public boolean supports(RawMessage m) {
         return "sms".equals(m.channel()) && SENDER.equals(m.sender());
@@ -32,15 +37,30 @@ public final class IciciSmsParser implements MessageParser {
     @Override
     public Optional<ParsedTxn> parse(RawMessage m) {
         Matcher v1 = V1.matcher(m.body());
-        if (!v1.find()) return Optional.empty();
+        if (v1.find()) {
+            BigDecimal amount = Amounts.first(m.body());
+            OffsetDateTime at = Dates.ist(v1.group("when"));
+            if (amount == null || at == null) return Optional.empty();
 
-        BigDecimal amount = Amounts.first(m.body());
-        OffsetDateTime at = Dates.ist(v1.group("when"));
-        if (amount == null || at == null) return Optional.empty();
+            Direction d = "debited".equals(v1.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
+            return Optional.of(new ParsedTxn(v1.group("acct"), at, d, amount,
+                    v1.group("merchant").trim(), Amounts.statedBalance(m.body()),
+                    m.messageId()));
+        }
 
-        Direction d = "debited".equals(v1.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
-        return Optional.of(new ParsedTxn(v1.group("acct"), at, d, amount,
-                v1.group("merchant").trim(), Amounts.statedBalance(m.body()),
-                m.messageId()));
+        Matcher v2 = V2.matcher(m.body());
+        if (v2.find()) {
+            BigDecimal amount = new BigDecimal(v2.group(3).replace(",", "")).setScale(2, java.math.RoundingMode.HALF_UP);
+            // 23-Jul-2026 18:41 -> need to parse this.
+            java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("dd-MMM-yyyy HH:mm");
+            OffsetDateTime at = java.time.LocalDateTime.parse(v2.group("when"), fmt).atOffset(java.time.ZoneOffset.ofHoursMinutes(5, 30));
+
+            Direction d = "Dr".equals(v2.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
+            return Optional.of(new ParsedTxn(v2.group("acct"), at, d, amount,
+                    v2.group("merchant").trim(), Amounts.statedBalance(m.body()),
+                    m.messageId()));
+        }
+
+        return Optional.empty();
     }
 }

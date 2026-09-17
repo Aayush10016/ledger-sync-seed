@@ -15,8 +15,32 @@ public final class EmailParser implements MessageParser {
         return "email".equals(m.channel());
     }
 
+    private static final java.util.regex.Pattern ACCT = java.util.regex.Pattern.compile("Your account ending (\\d{4}) has been (debited|credited)");
+    private static final java.util.regex.Pattern MERCHANT = java.util.regex.Pattern.compile("Merchant / Remarks: (.+)");
+    private static final java.util.regex.Pattern DATE = java.util.regex.Pattern.compile("Date: [A-Za-z]{3}, (\\d{2} [A-Za-z]{3} \\d{4} \\d{2}:\\d{2}:\\d{2} \\+\\d{4})");
+
     @Override
     public Optional<ParsedTxn> parse(RawMessage m) {
-        throw new UnsupportedOperationException("email parsing is not implemented");
+        String body = m.body();
+        java.util.regex.Matcher a = ACCT.matcher(body);
+        if (!a.find()) return Optional.empty();
+        
+        String acct = a.group(1);
+        in.simplifymoney.ledgersync.model.Direction dir = "debited".equals(a.group(2)) 
+                ? in.simplifymoney.ledgersync.model.Direction.DEBIT : in.simplifymoney.ledgersync.model.Direction.CREDIT;
+                
+        java.util.regex.Matcher merch = MERCHANT.matcher(body);
+        String merchant = merch.find() ? merch.group(1).trim() : "UNKNOWN";
+        
+        java.math.BigDecimal amount = Amounts.first(body);
+        if (amount == null) return Optional.empty();
+        
+        java.util.regex.Matcher d = DATE.matcher(body);
+        if (!d.find()) return Optional.empty();
+        
+        java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss Z");
+        java.time.OffsetDateTime occurredAt = java.time.OffsetDateTime.parse(d.group(1), fmt);
+        
+        return Optional.of(new ParsedTxn(acct, occurredAt, dir, amount, merchant, null, m.messageId()));
     }
 }

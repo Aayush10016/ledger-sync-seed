@@ -9,10 +9,15 @@ import java.util.List;
 public final class InMemoryLedgerStore implements LedgerStore {
 
     private final List<NormalizedTxn> rows = new ArrayList<>();
+    private final List<in.simplifymoney.ledgersync.model.Discrepancy> disc = new ArrayList<>();
 
     @Override public void save(NormalizedTxn txn) { rows.add(txn); }
 
     @Override public List<NormalizedTxn> all() { return Collections.unmodifiableList(rows); }
+
+    @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) { disc.add(d); }
+
+    @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return Collections.unmodifiableList(disc); }
 
     @Override public long count() { return rows.size(); }
 }

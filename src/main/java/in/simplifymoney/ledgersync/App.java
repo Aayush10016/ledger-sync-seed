@@ -50,12 +50,13 @@ public final class App {
                 Files.createDirectories(out);
                 try (SqlLedgerStore store = new SqlLedgerStore(DB)) {
                     var ledger = store.all();
+                    var discrepancies = store.discrepancies();
                     Files.writeString(out.resolve("ledger.json"),
                             Json.writePretty(Reports.ledgerDocument(ledger)));
                     Files.writeString(out.resolve("summary.json"),
                             Json.writePretty(Reports.summary(ledger)));
                     Files.writeString(out.resolve("reconciliation.json"),
-                            Json.writePretty(Reports.reconciliation(ledger)));
+                            Json.writePretty(Reports.reconciliation(discrepancies)));
                     System.out.println("wrote 3 files to " + out);
                 }
             }
