@@ -176,11 +176,19 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 try {
                     client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
                 } catch (TransactionCanceledException e) {
-                     if (!e.cancellationReasons().isEmpty() && "ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
-                        System.out.println("Message ID collision during update, skipping: " + e.getMessage());
-                     } else {
-                         throw new IllegalStateException("Message index update failed: " + e.getMessage(), e);
-                     }
+                    boolean messageIndexCollision = false;
+                    if (e.cancellationReasons() != null) {
+                        for (var reason : e.cancellationReasons()) {
+                            if ("ConditionalCheckFailed".equals(reason.code())) {
+                                messageIndexCollision = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (messageIndexCollision) {
+                        throw new IllegalStateException("Transaction update failed: A new message ID belongs to a different transaction.", e);
+                    }
+                    throw new IllegalStateException("Message index update failed: " + e.getMessage(), e);
                 }
             }
             return;
@@ -232,12 +240,29 @@ public class DynamoDbLedgerStore implements DocumentStore {
         try {
             client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
         } catch (TransactionCanceledException e) {
-            // If the primary transaction item already exists, this is a safe idempotent retry.
-            // If the condition failed on a MSG# index but NOT the ACCT# index, it means there's a collision!
-            if (!e.cancellationReasons().isEmpty() && "ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
+            boolean mainTxnFailed = false;
+            boolean messageIndexFailed = false;
+
+            if (e.cancellationReasons() != null && !e.cancellationReasons().isEmpty()) {
+                // writeItems order: [mainTxn, categoryTotal, msgIndex1, msgIndex2...]
+                if ("ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
+                    mainTxnFailed = true;
+                }
+                
+                for (int i = 2; i < e.cancellationReasons().size(); i++) {
+                    if ("ConditionalCheckFailed".equals(e.cancellationReasons().get(i).code())) {
+                        messageIndexFailed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (messageIndexFailed) {
+                throw new IllegalStateException("Transaction failed: A message ID already exists and belongs to a different transaction.", e);
+            } else if (mainTxnFailed) {
                 System.out.println("Transaction already exists, skipping to maintain idempotency.");
             } else {
-                throw new IllegalStateException("Transaction failed (possible message ID overwrite collision): " + e.getMessage(), e);
+                throw new IllegalStateException("Transaction failed due to unknown reasons: " + e.getMessage(), e);
             }
         }
     }

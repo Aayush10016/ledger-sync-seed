@@ -202,23 +202,26 @@ I chose **DynamoDB (Local)**. The `ConsistencyChecker`, `Backfill`, and `DynamoD
 **Why DynamoDB over MongoDB?** 
 DynamoDB provides strict guarantees around high-performance scaling through its Single-Table Design patterns. With `TransactWriteItems`, we can safely insert transactions, map their message IDs, and update running category totals atomically, ensuring the database remains completely consistent without complex aggregation pipelines or expensive index scanning.
 
-### Theoretical Engine Performance (at 100,000 transactions)
+### Performance Metrics (at 100,000 transactions)
 
-*Note: These are the theoretical, by-design query efficiency metrics expected by the document store engine for the 3 allowed access patterns.*
+We must distinguish between **Measured Results** (obtained from actual execution testing) and **Design Expectations** (derived from the access pattern design but potentially unverified at massive scale without production infrastructure).
+
+#### **Design Expectations** (Theoretical Engine Metrics)
+*Note: These are the theoretical, by-design query efficiency metrics expected by the DynamoDB engine for the 3 allowed access patterns based on our Single Table Design.*
 
 #### Q1: `forAccountMonth(accountLast4, month)`
-- **ScannedCount:** `N` (where N is the number of transactions for that specific account in that specific month)
-- **Count:** `N`
+- **Expected ScannedCount:** `N` (where N is the number of transactions for that specific account in that specific month)
+- **Expected Count:** `N`
 - *Why:* The query directly targets the partition key (`ACCT#1234`) and uses a range key `begins_with(SK, TXN#YYYY-MM)`. It reads exactly what it returns, scanning no irrelevant documents.
 
 #### Q2: `categoryTotals(accountLast4)`
-- **ScannedCount:** `4` (At most 4, one for each Category: SPEND, INCOME, MICRO, TRANSFER)
-- **Count:** `4`
+- **Expected ScannedCount:** `4` (At most 4, one for each Category: SPEND, INCOME, MICRO, TRANSFER)
+- **Expected Count:** `4`
 - *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys.
 
 #### Q3: `byMessageId(messageId)`
-- **ScannedCount:** `Not exposed by GetItem (Conceptually 1)`
-- **Count:** `Not exposed by GetItem (Conceptually 1 or 0)`
+- **Expected ScannedCount:** `Not exposed by GetItem (Conceptually 1)`
+- **Expected Count:** `Not exposed by GetItem (Conceptually 1 or 0)`
 - *Why:* DynamoDB's `GetItem` API does not return `ScannedCount` or `Count` because it is an explicit O(1) Hash Map lookup. The engine mathematically examines exactly **1 item** and returns **1 item** (or 0 if not found), independent of the 100,000 records in the table.
 
 ### Decision Log

@@ -37,6 +37,9 @@ public class DynamoDbLedgerStoreIntegrationTest {
         } catch (ResourceNotFoundException e) {
             // ignore
         } catch (Exception e) {
+            if ("true".equals(System.getenv("CI"))) {
+                throw new IllegalStateException("DynamoDB Local is required in CI but failed to start/connect.", e);
+            }
             Assumptions.assumeTrue(false, "DynamoDB Local is not available on port 8000. Skipping tests.");
         }
 
