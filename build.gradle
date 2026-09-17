@@ -17,6 +17,8 @@ dependencies {
     // loaded reflectively by java.sql.DriverManager at run time, so it is a
     // runtime dependency only. Add whatever you need for your document store.
     runtimeOnly 'com.h2database:h2:2.2.224'
+    implementation platform('software.amazon.awssdk:bom:2.25.11')
+    implementation 'software.amazon.awssdk:dynamodb'
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
