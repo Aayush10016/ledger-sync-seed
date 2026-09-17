@@ -66,6 +66,9 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 } catch (java.nio.charset.MalformedInputException | java.nio.charset.UnmappableCharacterException ex) {
                     sql = Files.readString(f, java.nio.charset.StandardCharsets.UTF_16LE);
                 }
+                if (sql.startsWith("\uFEFF")) {
+                    sql = sql.substring(1);
+                }
                 for (String stmt : sql.split(";")) {
                     if (!stmt.isBlank()) st.execute(stmt);
                 }
