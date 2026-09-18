@@ -34,8 +34,7 @@ public final class ConsistencyChecker {
         // SQL store is dirty, we need to deduplicate it first exactly as backfill does
         java.util.Map<String, in.simplifymoney.ledgersync.model.NormalizedTxn> deduplicatedTxns = new java.util.LinkedHashMap<>();
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : allSqlTxns) {
-            String m = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
-            String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction().name() + "|" + txn.amount().toPlainString() + "|" + m;
+            String deduplicationKey = TxnIdentity.getId(txn);
             deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                 java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
                 mergedIds.addAll(incoming.sourceMessageIds());

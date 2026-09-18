@@ -35,4 +35,94 @@ public class IngestServiceTest {
         // Ensure both are saved, not merged
         assertEquals(2, store.count());
     }
+
+    @Test
+    public void testDuplicateSmsIsIdempotent() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        String msg1 = "{\"message_id\":\"msg-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        String msg2 = "{\"message_id\":\"msg-2\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:10Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        
+        Files.writeString(corpus, msg1 + "\n" + msg2 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        
+        service.ingestFile(corpus);
+        
+        // Ensure they are merged into one transaction
+        assertEquals(1, store.count());
+        assertEquals(2, store.all().get(0).sourceMessageIds().size());
+    }
+
+    @Test
+    public void testDifferentEmailBodiesNotMerged() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        String msg1 = "{\"message_id\":\"em-1\",\"channel\":\"email\",\"sender\":\"alerts@hdfcbank.net\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Date: Wed, 15 May 2024 10:00:00 +0530\\nSubject: Transaction alert\\n\\nYour account ending 1234 has been debited with INR 50.00 on 15-05-24 at 10:00. Info: AMAZON PAY.\"}";
+        String msg2 = "{\"message_id\":\"em-2\",\"channel\":\"email\",\"sender\":\"alerts@hdfcbank.net\",\"received_at\":\"2024-05-15T10:00:05Z\",\"device_id\":\"d1\",\"body\":\"Date: Wed, 15 May 2024 10:00:00 +0530\\nSubject: Transaction alert\\n\\nYour account ending 1234 has been debited with INR 50.00 on 15-05-24 at 10:00. Info: FLIPKART.\"}";
+        
+        Files.writeString(corpus, msg1 + "\n" + msg2 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        
+        service.ingestFile(corpus);
+        
+        // Ensure they are saved as distinct transactions because bodies differ
+        assertEquals(2, store.count());
+    }
+
+    @Test
+    public void testReingestionIdempotency() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        String msg1 = "{\"message_id\":\"msg-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        Files.writeString(corpus, msg1 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        
+        // Run once
+        service.ingestFile(corpus);
+        assertEquals(1, store.count());
+        
+        // Run again
+        service.ingestFile(corpus);
+        // Count should still be 1, because TxnIdentity logic deduplicates existing vs incoming
+        assertEquals(1, store.count());
+    }
+
+    @Test
+    public void testReconciliationRecordIsDeterministic() throws IOException {
+        // Need to run a corpus that requires a synthesized reconciliation record.
+        // We will fake a small dataset that has a balance discrepancy.
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        // Two messages that cause a gap of 100.00
+        // msg1: balance 1000
+        String msg1 = "{\"message_id\":\"msg-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER. Avl Bal: Rs.1000.00\"}";
+        // msg2: balance 850 (amount is 50, so previous balance was 900. Gap = 1000 - 900 = 100)
+        String msg2 = "{\"message_id\":\"msg-2\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:05:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:05 to ZOMATO. Avl Bal: Rs.850.00\"}";
+        
+        Files.writeString(corpus, msg1 + "\n" + msg2 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        
+        service.ingestFile(corpus);
+        
+        // Should have 3 transactions: msg1, msg2, and the recon record for 100.00
+        assertEquals(3, store.count());
+        
+        // Run again
+        service.ingestFile(corpus);
+        
+        // Count should STILL be 3, proving recon ID is deterministic
+        assertEquals(3, store.count());
+    }
 }

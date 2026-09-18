@@ -87,13 +87,20 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             autoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
 
-            // Idempotency: Delete any existing rows matching the transaction exact key to avoid duplication on re-ingestion
+            // Idempotency: Delete any existing rows matching the exact transaction identity to avoid duplication
+            // and to avoid deleting independent transactions with the same visible fields.
+            // TxnIdentity is defined by the first sorted message ID, which will be at the start of the string.
             try (PreparedStatement del = conn.prepareStatement(
-                    "DELETE FROM ledger WHERE account_last4 = ? AND occurred_at = ? AND direction = ? AND amount = ?")) {
+                    "DELETE FROM ledger WHERE account_last4 = ? AND occurred_at = ? AND direction = ? AND amount = ? AND merchant = ? AND (source_message_ids = ? OR source_message_ids LIKE ?)")) {
                 del.setString(1, t.accountLast4());
                 del.setString(2, t.occurredAt().toString());
                 del.setString(3, t.direction().name());
                 del.setBigDecimal(4, t.amount());
+                del.setString(5, t.merchant());
+                
+                String firstMsgId = t.sourceMessageIds().get(0);
+                del.setString(6, firstMsgId);
+                del.setString(7, firstMsgId + ",%");
                 del.executeUpdate();
             }
 

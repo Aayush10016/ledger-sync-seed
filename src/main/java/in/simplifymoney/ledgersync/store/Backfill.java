@@ -28,6 +28,7 @@ public final class Backfill {
         AtomicLong written = new AtomicLong(0);
         AtomicLong skipped = new AtomicLong(0);
         AtomicLong failed = new AtomicLong(0);
+        boolean timedOut = false;
 
         try {
             List<NormalizedTxn> allTxns = source.all();
@@ -98,6 +99,7 @@ public final class Backfill {
             executor.shutdown();
             if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
                 System.err.println("Backfill executor timed out.");
+                timedOut = true;
             }
 
             System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
@@ -107,7 +109,10 @@ public final class Backfill {
                 System.err.println("Note: " + failed.get() + " records failed. Checkpointing is not implemented. A re-run will process all items and skip already written ones idempotently.");
                 throw new IllegalStateException("Backfill completed with " + failed.get() + " failures. Check logs for details.");
             }
-            return new Result(read.get(), written.get(), skipped.get(), failed.get());
+            return new Result(read.get(), written.get(), skipped.get(), failed.get(), timedOut);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new Result(read.get(), written.get(), skipped.get(), failed.get(), true);
         } catch (Exception e) {
             e.printStackTrace();
             throw new RuntimeException("Backfill failed critically", e);
@@ -129,5 +134,5 @@ public final class Backfill {
         return isRetryable(e.getCause());
     }
 
-    public record Result(long read, long written, long skipped, long failed) {}
+    public record Result(long read, long written, long skipped, long failed, boolean timedOut) {}
 }

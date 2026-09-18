@@ -267,9 +267,15 @@ public final class IngestService {
                             Direction synDir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
                             java.math.BigDecimal synAmt = diff.abs();
                             OffsetDateTime synTime = t.occurredAt().minusSeconds(1);
-                            
+
+                            // Use a deterministic ID derived from stable fields so that re-running
+                            // the pipeline against the same corpus produces the exact same reconciliation
+                            // record and does NOT create duplicates on a second pass.
+                            String reconId = "recon-" + sha256Hex(
+                                acct + "|" + synTime.toEpochSecond() + "|" + synAmt.toPlainString());
+
                             synthesizedTxns.add(new NormalizedTxn(
-                                acct, synTime, synDir, synAmt, Category.SPEND, "MISSING_DATA", List.of("synth-" + java.util.UUID.randomUUID().toString())
+                                acct, synTime, synDir, synAmt, Category.SPEND, "MISSING_DATA", List.of(reconId)
                             ));
                         }
                     }
@@ -324,6 +330,25 @@ public final class IngestService {
 
     private boolean isUpi(ParsedTxn p) {
         return p.merchant() != null && p.merchant().toUpperCase().contains("UPI");
+    }
+
+    /**
+     * Returns the lower-case hex SHA-256 digest of the given string.
+     * Used to produce deterministic, collision-resistant reconciliation IDs.
+     */
+    static String sha256Hex(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is guaranteed by the JVM spec — this can never happen.
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 
     static NormalizedTxn withCategory(NormalizedTxn t, Category c) {
