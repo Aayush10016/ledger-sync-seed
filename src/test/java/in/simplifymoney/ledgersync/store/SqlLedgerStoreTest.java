@@ -234,10 +234,10 @@ public class SqlLedgerStoreTest {
             futures.add(executor.submit(() -> {
                 try {
                     latch.await();
-                    // Different TxnId because amount is different
+                    // Different amount makes them incompatible, but different source list makes their initial TxnIds different
                     NormalizedTxn t = new NormalizedTxn(
                             "1234", baseTime, Direction.DEBIT, new BigDecimal("100.00").add(new BigDecimal(index)),
-                            Category.SPEND, "RACE_MERCH", List.of("msg-race-source")
+                            Category.SPEND, "RACE_MERCH", List.of("msg-race-source", "msg-unique-" + index)
                     );
                     try (SqlLedgerStore s = new SqlLedgerStore(dbFile)) {
                         s.save(t);
