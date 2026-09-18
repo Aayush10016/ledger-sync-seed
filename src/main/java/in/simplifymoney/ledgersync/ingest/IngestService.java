@@ -63,7 +63,7 @@ public final class IngestService {
             existingKeysToMsgIds.computeIfAbsent(key, k -> new java.util.HashSet<>()).addAll(e.sourceMessageIds());
         }
 
-        List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
+        List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns, messages);
         int written = 0;
         int failedWrites = 0;
         for (NormalizedTxn t : txns) {
@@ -127,85 +127,159 @@ public final class IngestService {
         return out;
     }
 
-    private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed) {
-        // Deduplicate
-        Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
+    private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed, List<RawMessage> raws) {
+        Map<String, RawMessage> rawMap = new java.util.HashMap<>();
+        for (RawMessage r : raws) rawMap.put(r.messageId(), r);
+
+        // Group by visible fields.
+        List<List<ParsedTxn>> groups = new ArrayList<>();
         for (ParsedTxn p : parsed) {
             String m = p.merchant() == null ? "" : p.merchant().trim().toLowerCase();
             String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction().name() + "|" + p.amount().toPlainString() + "|" + m;
-            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
+            
+            boolean added = false;
+            for (List<ParsedTxn> group : groups) {
+                ParsedTxn first = group.get(0);
+                String firstM = first.merchant() == null ? "" : first.merchant().trim().toLowerCase();
+                String firstKey = first.accountLast4() + "|" + first.occurredAt().toEpochSecond() + "|" + first.direction().name() + "|" + first.amount().toPlainString() + "|" + firstM;
+                
+                if (key.equals(firstKey)) {
+                    // Check if balances conflict
+                    java.math.BigDecimal bal1 = p.statedBalance();
+                    java.math.BigDecimal groupBal = null;
+                    boolean balancesConflict = false;
+                    for (ParsedTxn item : group) {
+                        if (item.statedBalance() != null) {
+                            if (groupBal == null) groupBal = item.statedBalance();
+                            else if (groupBal.compareTo(item.statedBalance()) != 0) balancesConflict = true;
+                        }
+                    }
+                    if (bal1 != null && groupBal != null && bal1.compareTo(groupBal) != 0) {
+                        balancesConflict = true;
+                    }
+                    
+                    // Check channel conflicts: same channel but different body
+                    boolean channelConflict = false;
+                    RawMessage rawP = rawMap.get(p.sourceMessageId());
+                    if (rawP != null) {
+                        for (ParsedTxn item : group) {
+                            RawMessage rawItem = rawMap.get(item.sourceMessageId());
+                            if (rawItem != null && rawP.channel().equals(rawItem.channel())) {
+                                if (rawP.channel().equals("email")) {
+                                    channelConflict = true; // Two emails in same second = distinct purchases
+                                } else if (!rawP.body().equals(rawItem.body())) {
+                                    channelConflict = true; // Distinct SMS
+                                }
+                            }
+                        }
+                    }
+
+                    if (!balancesConflict && !channelConflict) {
+                        group.add(p);
+                        added = true;
+                        break;
+                    }
+                }
+            }
+            if (!added) {
+                List<ParsedTxn> list = new ArrayList<>();
+                list.add(p);
+                groups.add(list);
+            }
         }
 
         List<ParsedTxn> uniqueParsed = new ArrayList<>();
-        List<NormalizedTxn> out = new ArrayList<>();
-        for (List<ParsedTxn> group : groups.values()) {
-            ParsedTxn first = group.get(0);
-            uniqueParsed.add(first);
-            List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).distinct().toList();
-            if (msgIds.size() > 1) {
-                System.out.println("MERGING IDs: " + msgIds + " for visible fields " + first.accountLast4() + " " + first.amount());
-            }
-            Category c = determineCategory(first);
-            out.add(new NormalizedTxn(first.accountLast4(), first.occurredAt(), first.direction(),
-                    first.amount(), c, first.merchant(), msgIds));
+        for (List<ParsedTxn> group : groups) {
+            uniqueParsed.add(group.get(0));
         }
 
-        // Compute Discrepancies
+        List<NormalizedTxn> out = new ArrayList<>();
+        for (List<ParsedTxn> group : groups) {
+            ParsedTxn first = group.get(0);
+            List<String> ids = new ArrayList<>();
+            for (ParsedTxn item : group) {
+                ids.add(item.sourceMessageId());
+            }
+            Category c = determineCategory(first);
+            out.add(new NormalizedTxn(
+                    first.accountLast4(),
+                    first.occurredAt(),
+                    first.direction(),
+                    first.amount(),
+                    c,
+                    first.merchant(),
+                    ids
+            ));
+        }
+
         List<in.simplifymoney.ledgersync.model.Discrepancy> existingDisc = store.discrepancies();
         java.util.Set<String> existingDiscKeys = new java.util.HashSet<>();
         for (in.simplifymoney.ledgersync.model.Discrepancy d : existingDisc) {
             existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount());
         }
 
-        Map<String, List<ParsedTxn>> byAcct = new LinkedHashMap<>();
-        for (ParsedTxn p : uniqueParsed) {
-            byAcct.computeIfAbsent(p.accountLast4(), k -> new ArrayList<>()).add(p);
+        Map<String, List<NormalizedTxn>> byAcct = new java.util.LinkedHashMap<>();
+        for (NormalizedTxn t : out) {
+            byAcct.computeIfAbsent(t.accountLast4(), k -> new ArrayList<>()).add(t);
         }
+        
+        List<NormalizedTxn> synthesizedTxns = new ArrayList<>();
 
-        for (Map.Entry<String, List<ParsedTxn>> entry : byAcct.entrySet()) {
+        for (Map.Entry<String, List<NormalizedTxn>> entry : byAcct.entrySet()) {
             String acct = entry.getKey();
-            if ("3310".equals(acct)) continue; // The assignment says "Ignore it" for credit card balances
-            List<ParsedTxn> txns = entry.getValue();
-            txns.sort(java.util.Comparator.comparing(ParsedTxn::occurredAt));
+            if ("3310".equals(acct)) continue;
+            List<NormalizedTxn> txns = entry.getValue();
+            txns.sort(java.util.Comparator.comparing(NormalizedTxn::occurredAt));
 
             java.math.BigDecimal lastBalance = null;
             java.math.BigDecimal sumSinceLastBalance = java.math.BigDecimal.ZERO;
 
-            for (ParsedTxn p : txns) {
-                java.math.BigDecimal amt = p.direction() == Direction.DEBIT ? p.amount().negate() : p.amount();
+            for (NormalizedTxn t : txns) {
+                java.math.BigDecimal amt = t.direction() == Direction.DEBIT ? t.amount().negate() : t.amount();
                 sumSinceLastBalance = sumSinceLastBalance.add(amt);
+                
+                java.math.BigDecimal statedBal = null;
+                if (t.sourceMessageIds() != null && !t.sourceMessageIds().isEmpty()) {
+                    for (ParsedTxn p : uniqueParsed) {
+                        if (p.sourceMessageId().equals(t.sourceMessageIds().get(0))) {
+                            statedBal = p.statedBalance();
+                            break;
+                        }
+                    }
+                }
 
-                if (p.statedBalance() != null) {
+                if (statedBal != null) {
                     if (lastBalance != null) {
                         java.math.BigDecimal expected = lastBalance.add(sumSinceLastBalance);
-                        if (expected.compareTo(p.statedBalance()) != 0) {
-                            java.math.BigDecimal diff = p.statedBalance().subtract(expected);
+                        if (expected.compareTo(statedBal) != 0) {
+                            java.math.BigDecimal diff = statedBal.subtract(expected);
+                            
                             in.simplifymoney.ledgersync.model.Discrepancy d = new in.simplifymoney.ledgersync.model.Discrepancy(
-                                    acct, p.occurredAt(), diff,
-                                    "ledger computed " + expected.toPlainString() + " but bank reported " + p.statedBalance().toPlainString()
+                                    acct, t.occurredAt(), diff,
+                                    "ledger computed " + expected.toPlainString() + " but bank reported " + statedBal.toPlainString()
                             );
                             String dKey = d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount();
                             if (!existingDiscKeys.contains(dKey)) {
                                 store.save(d);
                                 existingDiscKeys.add(dKey);
-                                
-                                Direction dir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
-                                java.math.BigDecimal absDiff = diff.abs();
-                                Category cat = dir == Direction.DEBIT ? Category.SPEND : Category.INCOME;
-                                
-                                NormalizedTxn syntheticTxn = new NormalizedTxn(
-                                    acct, p.occurredAt().minusSeconds(1), dir, absDiff, cat, "Missing Transaction",
-                                    List.of("synth-" + p.sourceMessageId())
-                                );
-                                out.add(syntheticTxn);
                             }
+                            
+                            Direction synDir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
+                            java.math.BigDecimal synAmt = diff.abs();
+                            OffsetDateTime synTime = t.occurredAt().minusSeconds(1);
+                            
+                            synthesizedTxns.add(new NormalizedTxn(
+                                acct, synTime, synDir, synAmt, Category.SPEND, "MISSING_DATA", List.of("synth-" + java.util.UUID.randomUUID().toString())
+                            ));
                         }
                     }
-                    lastBalance = p.statedBalance();
+                    lastBalance = statedBal;
                     sumSinceLastBalance = java.math.BigDecimal.ZERO;
                 }
             }
         }
+        
+        out.addAll(synthesizedTxns);
 
         // Identify TRANSFER
         categorizeTransfers(out);
