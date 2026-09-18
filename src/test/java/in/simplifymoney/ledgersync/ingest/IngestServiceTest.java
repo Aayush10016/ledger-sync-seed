@@ -14,6 +14,7 @@ import java.time.OffsetDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class IngestServiceTest {
 
@@ -201,4 +202,41 @@ public class IngestServiceTest {
         assertNotEquals(Category.TRANSFER, txns.get(1).category(),
                 "Credit should NOT become TRANSFER when time gap > 5 minutes");
     }
+
+    @Test
+    public void testSameTransactionWithTimezoneFormattingDifferencesMerges() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        // IST is UTC+5:30. 10:00:00+05:30 is 04:30:00Z
+        String sms = "{\"message_id\":\"msg-tz-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00+05:30\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        String email = "{\"message_id\":\"msg-tz-2\",\"channel\":\"email\",\"sender\":\"alerts@hdfcbank.net\",\"received_at\":\"2024-05-15T04:30:00Z\",\"device_id\":\"d1\",\"body\":\"Date: Wed, 15 May 2024 10:00:00 +0530\\nSubject: Transaction alert\\n\\nYour account ending 1234 has been debited with INR 50.00.\\nMerchant / Remarks: Uber Trip\"}";
+        
+        Files.writeString(corpus, sms + "\n" + email + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        service.ingestFile(corpus);
+        
+        assertEquals(1, store.count());
+    }
+
+    @Test
+    public void testTwoLegitimateTransactionsWithSimilarAttributesRemainSeparate() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        // Same amount, same account, same merchant, but 1 second apart (different transaction)
+        String msg1 = "{\"message_id\":\"msg-sim-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        String msg2 = "{\"message_id\":\"msg-sim-2\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:05Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:01 to UBER.\"}";
+        
+        Files.writeString(corpus, msg1 + "\n" + msg2 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+        service.ingestFile(corpus);
+        
+        assertEquals(2, store.count());
+    }
+
 }

@@ -227,7 +227,7 @@ so the message lookup metric reports the deterministic point-read call count.
 #### Q2: `categoryTotals(accountLast4)`
 - **Expected ScannedCount:** `4` (At most 4, one for each Category: SPEND, INCOME, MICRO, TRANSFER)
 - **Expected Count:** `4`
-- **Measured (CI):** See CI logs. Typically 4 ScannedCount / 4 Count.
+- **Measured (CI):** `1` ScannedCount / `1` Count. (The expected result was 4/4 under the multi-category assumption, but this benchmark dataset contains only SPEND records, producing 1/1.)
 - *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys.
 
 #### Q3: `byMessageId(messageId)`

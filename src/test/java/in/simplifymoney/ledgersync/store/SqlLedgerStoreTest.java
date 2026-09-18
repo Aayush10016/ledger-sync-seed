@@ -216,4 +216,87 @@ public class SqlLedgerStoreTest {
                 .filter(t -> t.merchant() != null && t.merchant().equals("ORIGINAL_MERCH")).toList();
         assertEquals(1, rows.size());
     }
+
+    @Test
+    public void concurrentWritesWithSameSourceAndDifferentTxnIdAreRejected() throws Exception {
+        int threadCount = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch latch = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threadCount);
+        OffsetDateTime baseTime = OffsetDateTime.parse("2026-07-08T10:00:00+05:30");
+
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger successCount = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger failCount = new java.util.concurrent.atomic.AtomicInteger();
+
+        for (int i = 0; i < threadCount; i++) {
+            final int index = i;
+            futures.add(executor.submit(() -> {
+                try {
+                    latch.await();
+                    // Different TxnId because amount is different
+                    NormalizedTxn t = new NormalizedTxn(
+                            "1234", baseTime, Direction.DEBIT, new BigDecimal("100.00").add(new BigDecimal(index)),
+                            Category.SPEND, "RACE_MERCH", List.of("msg-race-source")
+                    );
+                    try (SqlLedgerStore s = new SqlLedgerStore(dbFile)) {
+                        s.save(t);
+                    }
+                    successCount.incrementAndGet();
+                } catch (Exception e) {
+                    failCount.incrementAndGet();
+                } finally {
+                    done.countDown();
+                }
+            }));
+        }
+
+        latch.countDown();
+        done.await(10, TimeUnit.SECONDS);
+        executor.shutdown();
+
+        // Exactly 1 should succeed, the rest should fail due to SQLException (wrapped in IllegalStateException or RuntimeException)
+        assertEquals(1, successCount.get());
+        assertEquals(threadCount - 1, failCount.get());
+    }
+
+    @Test
+    public void concurrentRepeatedIngestionSameTxnIsIdempotent() throws Exception {
+        int rounds = 3;
+        int threadCount = 5;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+
+        NormalizedTxn t = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-09T10:00:00+05:30"), Direction.DEBIT, new BigDecimal("50.00"),
+                Category.SPEND, "REPEATED_MERCH", List.of("msg-repeated-1")
+        );
+
+        for (int r = 0; r < rounds; r++) {
+            CountDownLatch latch = new CountDownLatch(1);
+            CountDownLatch done = new CountDownLatch(threadCount);
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+            for (int i = 0; i < threadCount; i++) {
+                futures.add(executor.submit(() -> {
+                    try {
+                        latch.await();
+                        try (SqlLedgerStore s = new SqlLedgerStore(dbFile)) {
+                            s.save(t);
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    } finally {
+                        done.countDown();
+                    }
+                }));
+            }
+            latch.countDown();
+            done.await();
+            for (java.util.concurrent.Future<?> f : futures) f.get();
+        }
+        executor.shutdown();
+
+        long matching = store.all().stream().filter(txn -> txn.merchant().equals("REPEATED_MERCH")).count();
+        assertEquals(1, matching);
+    }
 }

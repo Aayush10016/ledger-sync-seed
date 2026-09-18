@@ -1,7 +1,9 @@
 # Final Validation Requirements Report
 
-## 1. Final commit SHA
-`48ffe70` (Update README with accurate verify.sh count and CI perf note)
+## 1. Commit and Validation Traceability
+- **Final HEAD**: `b65f52f` (or newer commit including these final corrections)
+- **Commit tested by referenced CI run**: `f476020`
+*(Note: The commits after `f476020` are strictly documentation, report, and testing enhancements that do not alter the core executable logic.)*
 
 ## 2. List of files changed
 In the final pass, the following files were updated to resolve the remaining correctness and documentation issues:
@@ -70,8 +72,8 @@ The 256 count is the actual, physically correct number given the raw data. The e
 
 ## 11. Any remaining limitations
 - **Undiscovered "Ghost" Corruptions**: Because DynamoDB restricts scanning, it is impossible for `ConsistencyChecker` to discover synthetic data inserted into periods completely unknown to the SQL database.
-- **Cross-Channel Identity Drift**: Without a universally unique bank transaction reference number, SMS and Email pairs that differ by exact second, exact amount, or entirely non-overlapping sources will result in independent identical-looking ledger rows.
-- **Discrepancy Schema**: The document store does not durably serialize `reconciliation.json` gaps, holding them only in memory during the execution phase.
+- **Cross-Channel Identity Drift**: Without a universally unique bank transaction reference number, SMS and Email pairs that differ by exact second, exact amount, or entirely non-overlapping sources will result in independent identical-looking ledger rows. (Several deduplication tests prove we correctly merge them when attributes overlap deterministically, but we cannot merge them if all attributes genuinely contradict.)
+- **Discrepancy Persistence Scope**: As designed, the document store does not durably serialize `reconciliation.json` gaps into the DB; they remain in memory during execution and are properly exported to the generated file output. This satisfies the scope of the report generation, but is an architectural limitation if persistent DB storage for discrepancies was intended.
 
 ## 12. Final submission-readiness assessment
-The `Aayush10016/ledger-sync-seed` project is fully robust, correct, deeply documented, internally consistent, and **ready for submission**. All `P0` through `P3` findings have been successfully patched. The DynamoDB document store handles immense concurrency natively without index collisions, `verify.sh` builds offline accurately mirroring the ground truth, and the GitHub Action guarantees verifiable regression testing.
+The implemented requirements have been thoroughly tested against the available fixtures and CI scenarios. Known limitations are accurately documented, including identity ambiguity bounds and the memory-only discrepancy export. Final readiness depends on reviewer acceptance of these documented design boundaries.
