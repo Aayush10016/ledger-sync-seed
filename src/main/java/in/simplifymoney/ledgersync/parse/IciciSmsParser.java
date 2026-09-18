@@ -43,9 +43,13 @@ public final class IciciSmsParser implements MessageParser {
             if (amount == null || at == null) return Optional.empty();
 
             Direction d = "debited".equals(v1.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
+
+            Matcher r = Pattern.compile("(?i)(?:ref no|upi ref|reference|ref)\\.?\\s*[:\\-]?\\s*([A-Za-z0-9]{6,})").matcher(m.body());
+            String bankRef = r.find() ? r.group(1).trim() : null;
+
             return Optional.of(new ParsedTxn(v1.group("acct"), at, d, amount,
                     v1.group("merchant").trim(), Amounts.statedBalance(m.body()),
-                    m.messageId()));
+                    m.messageId(), bankRef));
         }
 
         Matcher v2 = V2.matcher(m.body());
@@ -56,9 +60,13 @@ public final class IciciSmsParser implements MessageParser {
             OffsetDateTime at = java.time.LocalDateTime.parse(v2.group("when"), fmt).atOffset(java.time.ZoneOffset.ofHoursMinutes(5, 30));
 
             Direction d = "Dr".equals(v2.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
+
+            Matcher r = Pattern.compile("(?i)(?:ref no|upi ref|reference|ref)\\.?\\s*[:\\-]?\\s*([A-Za-z0-9]{6,})").matcher(m.body());
+            String bankRef = r.find() ? r.group(1).trim() : null;
+
             return Optional.of(new ParsedTxn(v2.group("acct"), at, d, amount,
                     v2.group("merchant").trim(), Amounts.statedBalance(m.body()),
-                    m.messageId()));
+                    m.messageId(), bankRef));
         }
 
         return Optional.empty();

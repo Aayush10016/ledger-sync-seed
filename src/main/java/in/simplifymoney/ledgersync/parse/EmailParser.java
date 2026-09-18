@@ -18,6 +18,7 @@ public final class EmailParser implements MessageParser {
     private static final java.util.regex.Pattern ACCT = java.util.regex.Pattern.compile("Your account ending (\\d{4}) has been (debited|credited)");
     private static final java.util.regex.Pattern MERCHANT = java.util.regex.Pattern.compile("Merchant / Remarks: (.+)");
     private static final java.util.regex.Pattern DATE = java.util.regex.Pattern.compile("Date: [A-Za-z]{3}, (\\d{2} [A-Za-z]{3} \\d{4} \\d{2}:\\d{2}:\\d{2} \\+\\d{4})");
+    private static final java.util.regex.Pattern REF = java.util.regex.Pattern.compile("Transaction reference: (\\S+)");
 
     @Override
     public Optional<ParsedTxn> parse(RawMessage m) {
@@ -39,8 +40,12 @@ public final class EmailParser implements MessageParser {
         if (!d.find()) return Optional.empty();
         
         java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss Z");
-        java.time.OffsetDateTime occurredAt = java.time.OffsetDateTime.parse(d.group(1), fmt);
-        
-        return Optional.of(new ParsedTxn(acct, occurredAt, dir, amount, merchant, null, m.messageId()));
+        java.time.OffsetDateTime dt = java.time.OffsetDateTime.parse(d.group(1), 
+                java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss Z"));
+                
+        java.util.regex.Matcher r = REF.matcher(body);
+        String bankRef = r.find() ? r.group(1).trim() : null;
+                
+        return Optional.of(new ParsedTxn(acct, dt, dir, amount, merchant, null, m.messageId(), bankRef));
     }
 }

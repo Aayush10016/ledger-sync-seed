@@ -9,6 +9,9 @@ import java.time.OffsetDateTime;
  *
  * statedBalance is the account balance the bank quoted in the message, when it
  * quoted one. It may be null.
+ *
+ * bankReferenceId is the explicit transaction reference from the bank (e.g. UPI Ref, NEFT ID).
+ * It may be null if the message does not contain a reference.
  */
 public record ParsedTxn(
         String accountLast4,
@@ -17,5 +20,6 @@ public record ParsedTxn(
         BigDecimal amount,
         String merchant,
         BigDecimal statedBalance,
-        String sourceMessageId) {
+        String sourceMessageId,
+        String bankReferenceId) {
 }

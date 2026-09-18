@@ -377,8 +377,13 @@ public class DynamoDbLedgerStoreIntegrationTest {
                 Direction.DEBIT, new BigDecimal("99.00"),  // different amount => isCompatible returns false
                 Category.SPEND, "Shop", List.of("dangle-msg"));
 
-        assertThrows(IllegalStateException.class, () -> store.save(incompatible),
-                "Saving an incompatible transaction whose source ID is already owned must throw");
+        // The new save should recover by deleting the dangling pointer and successfully saving the new txn
+        store.save(incompatible);
+        
+        // Assert the new incompatible txn was saved properly
+        NormalizedTxn recovered = store.byMessageId("dangle-msg").orElseThrow();
+        assertEquals(new BigDecimal("99.00"), recovered.amount());
+        assertEquals(1, store.scanAllTransactions().size());
 
         // Original transaction is untouched
         assertEquals(new BigDecimal("15.00"), store.categoryTotals("9999").get(Category.SPEND));
@@ -425,5 +430,66 @@ public class DynamoDbLedgerStoreIntegrationTest {
         assertEquals(List.of("lifecycle-1"), byId.sourceMessageIds());
         assertEquals(new BigDecimal("75.00"), byId.amount());
         assertEquals(Category.SPEND, byId.category());
+    }
+
+    @Test
+    public void testConcurrentIncompatibleUpdates() throws Exception {
+        NormalizedTxn t1 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("m1"));
+        NormalizedTxn t2 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("99.99"), Category.SPEND, "Merch", List.of("m1"));
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService svc = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        java.util.concurrent.Future<?> f1 = svc.submit(() -> {
+            try { latch.await(); store.save(t1); } catch (Exception e) { throw new RuntimeException(e); }
+        });
+        java.util.concurrent.Future<?> f2 = svc.submit(() -> {
+            try { latch.await(); store.save(t2); } catch (Exception e) { throw new RuntimeException(e); }
+        });
+
+        latch.countDown();
+        
+        boolean f1Success = false;
+        boolean f2Success = false;
+        try { f1.get(); f1Success = true; } catch (Exception e) {}
+        try { f2.get(); f2Success = true; } catch (Exception e) {}
+
+        // Exactly one should succeed since they are incompatible but share the same message ID
+        assertTrue(f1Success ^ f2Success, "Exactly one concurrent incompatible write must succeed");
+        svc.shutdown();
+    }
+
+    @Test
+    public void testMultipleSourceIdsMerging() throws Exception {
+        NormalizedTxn base = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("m1"));
+        store.save(base);
+
+        NormalizedTxn merge1 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("m1", "new1"));
+        NormalizedTxn merge2 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("m1", "new2"));
+
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService svc = java.util.concurrent.Executors.newFixedThreadPool(2);
+
+        java.util.concurrent.Future<?> f1 = svc.submit(() -> {
+            try { latch.await(); store.save(merge1); } catch (Exception e) { throw new RuntimeException(e); }
+        });
+        java.util.concurrent.Future<?> f2 = svc.submit(() -> {
+            try { latch.await(); store.save(merge2); } catch (Exception e) { throw new RuntimeException(e); }
+        });
+
+        latch.countDown();
+        f1.get();
+        f2.get();
+        svc.shutdown();
+
+        // Both updates should succeed eventually. The final item should have all 3 message IDs
+        NormalizedTxn finalTxn = store.byMessageId("m1").orElseThrow();
+        assertTrue(finalTxn.sourceMessageIds().containsAll(List.of("m1", "new1", "new2")));
+        assertEquals(1, store.scanAllTransactions().size());
     }
 }

@@ -260,7 +260,16 @@ public class DynamoDbLedgerStore implements DocumentStore {
     private void handleExistingTransaction(NormalizedTxn txn, String acctPk, String txnSk) {
         Optional<NormalizedTxn> existing = transactionAt(acctPk, txnSk);
         if (existing.isEmpty()) {
-            throw new IllegalStateException("Existing message index points to a missing transaction");
+            // Dangling pointer recovery
+            for (String msgId : txn.sourceMessageIds()) {
+                client.deleteItem(software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest.builder()
+                        .tableName(tableName)
+                        .key(Map.of("PK", AttributeValue.builder().s("MSG#" + msgId).build(),
+                                    "SK", AttributeValue.builder().s("MSG").build()))
+                        .build());
+            }
+            save(txn);
+            return;
         }
         if (!isCompatible(existing.get(), txn)) {
             throw new IllegalStateException("Conflict: source messages belong to an incompatible transaction");

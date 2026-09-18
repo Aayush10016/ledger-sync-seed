@@ -39,4 +39,19 @@ public class TransferHeuristicTest {
         assertEquals(Category.TRANSFER, txns.get(3).category()); // credit2
         assertEquals(Category.SPEND, txns.get(4).category());    // debit3 remains SPEND
     }
+
+    @Test
+    public void testSequentialPurchasesNotMerged() {
+        OffsetDateTime t1 = OffsetDateTime.parse("2026-07-04T10:00:00Z");
+        
+        NormalizedTxn debit1 = new NormalizedTxn("1111", t1, Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "CAFE COFFEE DAY", List.of("m1"));
+        NormalizedTxn credit1 = new NormalizedTxn("2222", t1.plusSeconds(30), Direction.CREDIT, new BigDecimal("500.00"), Category.INCOME, "CAFE COFFEE DAY", List.of("m2"));
+        
+        List<NormalizedTxn> txns = new java.util.ArrayList<>(List.of(debit1, credit1));
+        
+        IngestService.categorizeTransfers(txns);
+
+        assertEquals(Category.SPEND, txns.get(0).category()); // debit1 remains SPEND
+        assertEquals(Category.INCOME, txns.get(1).category()); // credit1 remains INCOME
+    }
 }

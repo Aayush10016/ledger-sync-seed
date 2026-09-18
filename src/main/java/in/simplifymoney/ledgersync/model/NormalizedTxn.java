@@ -33,7 +33,8 @@ public record NormalizedTxn(
         BigDecimal amount,
         Category category,
         String merchant,
-        List<String> sourceMessageIds) {
+        List<String> sourceMessageIds,
+        String bankReferenceId) {
 
     public NormalizedTxn {
         Objects.requireNonNull(accountLast4, "accountLast4");
@@ -58,5 +59,11 @@ public record NormalizedTxn(
         }
         sourceMessageIds = List.copyOf(sourceMessageIds);
         merchant = merchant == null ? "" : merchant;
+    }
+
+    public NormalizedTxn(String accountLast4, OffsetDateTime occurredAt, Direction direction,
+                         BigDecimal amount, Category category, String merchant,
+                         List<String> sourceMessageIds) {
+        this(accountLast4, occurredAt, direction, amount, category, merchant, sourceMessageIds, null);
     }
 }
