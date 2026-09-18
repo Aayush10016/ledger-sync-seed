@@ -12,23 +12,24 @@ public final class InMemoryLedgerStore implements LedgerStore {
     private final List<in.simplifymoney.ledgersync.model.Discrepancy> disc = new ArrayList<>();
 
     @Override public void save(NormalizedTxn txn) {
+        String id = in.simplifymoney.ledgersync.util.TxnIdentity.getId(txn);
         NormalizedTxn existing = null;
-        for (String msgId : txn.sourceMessageIds()) {
-            for (NormalizedTxn r : rows) {
-                if (r.sourceMessageIds().contains(msgId)) {
-                    existing = r;
-                    break;
-                }
+        for (NormalizedTxn r : rows) {
+            if (in.simplifymoney.ledgersync.util.TxnIdentity.getId(r).equals(id)) {
+                existing = r;
+                break;
             }
-            if (existing != null) break;
         }
         if (existing != null) {
             java.util.Set<String> mergedIds = new java.util.TreeSet<>(existing.sourceMessageIds());
-            mergedIds.addAll(txn.sourceMessageIds());
+            if (txn.sourceMessageIds() != null) {
+                mergedIds.addAll(txn.sourceMessageIds());
+            }
             NormalizedTxn updated = new NormalizedTxn(
                     existing.accountLast4(), existing.occurredAt(), existing.direction(), 
                     existing.amount(), existing.category(), existing.merchant(),
-                    new java.util.ArrayList<>(mergedIds)
+                    new java.util.ArrayList<>(mergedIds),
+                    existing.bankReferenceId() != null ? existing.bankReferenceId() : txn.bankReferenceId()
             );
             rows.remove(existing);
             rows.add(updated);

@@ -43,6 +43,21 @@ public final class SelfCheck {
         }
 
         List<NormalizedTxn> ledger = store.all();
+        
+        System.out.println("VALIDATING ADVERSARIAL INVARIANTS");
+        java.util.Set<String> seenMessageIds = new java.util.HashSet<>();
+        for (NormalizedTxn txn : ledger) {
+            for (String msgId : txn.sourceMessageIds()) {
+                if (!seenMessageIds.add(msgId)) {
+                    System.err.println("  FAIL: Source message ID " + msgId + " mapped to multiple transactions!");
+                    failed = true;
+                }
+            }
+        }
+        if (!failed) {
+            System.out.println("  PASS: 1:1 message ID mapping verified.");
+        }
+
         Map<Category, BigDecimal> cats = in.simplifymoney.ledgersync.report.Reports
                 .byCategory(ledger);
         System.out.println("\nBY CATEGORY");

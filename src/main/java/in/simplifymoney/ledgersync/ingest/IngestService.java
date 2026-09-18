@@ -164,6 +164,27 @@ public final class IngestService {
                         balancesConflict = true;
                     }
                     
+                    // Strong evidence check: Bank references
+                    boolean refConflict = false;
+                    boolean refMatch = false;
+                    String ref1 = p.bankReferenceId();
+                    if (ref1 != null) {
+                        for (ParsedTxn item : group) {
+                            if (item.bankReferenceId() != null) {
+                                RawMessage rawP = rawMap.get(p.sourceMessageId());
+                                RawMessage rawItem = rawMap.get(item.sourceMessageId());
+                                boolean isCrossChannel = rawP != null && rawItem != null && !rawP.channel().equals(rawItem.channel());
+                                
+                                if (ref1.equals(item.bankReferenceId())) {
+                                    refMatch = true;
+                                } else if (!isCrossChannel) {
+                                    // Only conflict if same channel. Cross-channel often has different ref formats.
+                                    refConflict = true;
+                                }
+                            }
+                        }
+                    }
+                    
                     // Check channel conflicts: same channel but different body
                     boolean channelConflict = false;
                     RawMessage rawP = rawMap.get(p.sourceMessageId());
@@ -180,11 +201,18 @@ public final class IngestService {
                         }
                     }
 
-                    if (!balancesConflict && !channelConflict && canGroup(rawP, group, rawMap)) {
-                        group.add(p);
-                        added = true;
-                        break;
+                    boolean crossChannel = rawP != null && group.stream().anyMatch(
+                            item -> rawMap.containsKey(item.sourceMessageId()) &&
+                                    !rawP.channel().equals(rawMap.get(item.sourceMessageId()).channel()));
+
+                    // Keep ambiguous records separate: if they lack strong cross-channel evidence or have any conflicts
+                    if (refConflict || balancesConflict || channelConflict || (crossChannel && !refMatch && !canGroup(rawP, group, rawMap))) {
+                        continue; // try next group or add as new
                     }
+
+                    group.add(p);
+                    added = true;
+                    break;
                 }
             }
             if (!added) {
@@ -208,6 +236,15 @@ public final class IngestService {
             }
             String bestMerchant = chooseBestMerchant(group, rawMap);
             Category c = determineCategory(group, bestMerchant);
+            
+            String bankRef = null;
+            for (ParsedTxn item : group) {
+                if (item.bankReferenceId() != null) {
+                    bankRef = item.bankReferenceId();
+                    break;
+                }
+            }
+            
             out.add(new NormalizedTxn(
                     first.accountLast4(),
                     first.occurredAt(),
@@ -215,7 +252,8 @@ public final class IngestService {
                     first.amount(),
                     c,
                     bestMerchant,
-                    ids
+                    ids,
+                    bankRef
             ));
         }
 
@@ -385,7 +423,8 @@ public final class IngestService {
         String rightMerchant = normalizeTransferMerchant(right.merchant());
         return !leftMerchant.isBlank()
                 && leftMerchant.equals(rightMerchant)
-                && (leftMerchant.contains("IMPS/P2A") || leftMerchant.contains("NEFT"));
+                && (leftMerchant.contains("IMPS") || leftMerchant.contains("NEFT")
+                    || leftMerchant.contains("UPI") || leftMerchant.contains("TRANSFER"));
     }
 
     private static String normalizeTransferMerchant(String merchant) {
@@ -433,7 +472,7 @@ public final class IngestService {
 
     static NormalizedTxn withCategory(NormalizedTxn t, Category c) {
         return new NormalizedTxn(t.accountLast4(), t.occurredAt(), t.direction(),
-                t.amount(), c, t.merchant(), t.sourceMessageIds());
+                t.amount(), c, t.merchant(), t.sourceMessageIds(), t.bankReferenceId());
     }
 
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped,
