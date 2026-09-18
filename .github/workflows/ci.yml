@@ -8,6 +8,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: dummy
+      AWS_SECRET_ACCESS_KEY: dummy
+      AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -19,14 +23,16 @@ jobs:
         run: |
           docker compose up -d dynamodb-local
           echo "Waiting for DynamoDB to become available..."
-          for i in {1..10}; do
-            if aws dynamodb list-tables --endpoint-url http://localhost:8000 --region us-east-1 > /dev/null 2>&1; then
+          for i in {1..30}; do
+            if aws dynamodb list-tables --endpoint-url http://localhost:8000 --region us-east-1; then
               echo "DynamoDB is ready!"
               exit 0
             fi
+            docker compose logs --tail=20 dynamodb-local
             sleep 2
           done
           echo "DynamoDB failed to start!"
+          docker compose logs dynamodb-local
           exit 1
       
       - name: Run unit and integration tests
