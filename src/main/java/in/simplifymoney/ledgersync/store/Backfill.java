@@ -4,6 +4,7 @@ import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.util.TxnIdentity;
 
 import java.util.List;
+import java.time.YearMonth;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -35,6 +36,8 @@ public final class Backfill {
         AtomicLong failed = new AtomicLong(0);
         Status status = Status.COMPLETED;
         boolean terminated = true;
+        boolean timedOut = false;
+        List<FailureDetail> failureDetails = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
         try {
             List<NormalizedTxn> allTxns = source.all();
@@ -81,12 +84,11 @@ public final class Backfill {
                             success = true;
                         } catch (Exception e) {
                             lastException = e;
-                            boolean retryable = isRetryable(e);
-                            if (!retryable) {
+                            if (classify(e) == FailureType.NON_RETRYABLE) {
                                 break;
                             }
                             try {
-                                Thread.sleep(200L * attempts); // Simple backoff
+                                Thread.sleep(200L * (1L << Math.max(0, attempts - 1)));
                             } catch (InterruptedException ie) {
                                 Thread.currentThread().interrupt();
                                 break;
@@ -98,9 +100,21 @@ public final class Backfill {
                         failed.incrementAndGet();
                         String exName = lastException != null ? lastException.getClass().getSimpleName() : "Unknown";
                         String exMsg = lastException != null ? lastException.getMessage() : "No message";
+                        FailureType failureType = classify(lastException);
+                        failureDetails.add(new FailureDetail(
+                                txn.accountLast4(),
+                                YearMonth.from(txn.occurredAt()).toString(),
+                                TxnIdentity.getId(txn),
+                                attempts,
+                                1,
+                                1,
+                                failureType,
+                                exName,
+                                exMsg,
+                                false));
                         System.err.println("Failed to insert transaction " + TxnIdentity.getId(txn) + 
                             " after " + attempts + " attempts. Exception: " + exName + 
-                            " - " + exMsg + ". Retryable: " + isRetryable(lastException));
+                            " - " + exMsg + ". FailureType: " + failureType);
                     }
                 }));
             }
@@ -109,6 +123,7 @@ public final class Backfill {
             if (!executor.awaitTermination(timeout, unit)) {
                 System.err.println("Backfill executor timed out. Cancelling unfinished tasks...");
                 status = Status.TIMED_OUT;
+                timedOut = true;
                 for (Future<?> future : futures) {
                     if (!future.isDone()) {
                         future.cancel(true);
@@ -134,19 +149,19 @@ public final class Backfill {
                     + ", Skipped: " + skipped.get() + ", Failed: " + failed.get());
                     
             if (failed.get() > 0) {
+                status = Status.FAILED;
                 System.err.println("Note: " + failed.get() + " records failed. Checkpointing is not implemented. A re-run will process all items and skip already written ones idempotently.");
-                throw new IllegalStateException("Backfill completed with " + failed.get() + " failures. Check logs for details.");
             }
             if (status == Status.TIMED_OUT && !terminated) {
                 System.err.println("Backfill timed out and executor did not terminate within the grace period.");
             }
             return new Result(read.get(), written.get(), skipped.get(), failed.get(),
-                    status == Status.TIMED_OUT, status, terminated);
+                    timedOut, status, terminated, List.copyOf(failureDetails));
         } catch (InterruptedException e) {
             System.err.println("Backfill interrupted.");
             Thread.currentThread().interrupt();
             return new Result(read.get(), written.get(), skipped.get(), failed.get(),
-                    true, Status.INTERRUPTED, false);
+                    true, Status.INTERRUPTED, false, List.copyOf(failureDetails));
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
@@ -155,8 +170,8 @@ public final class Backfill {
         }
     }
 
-    private boolean isRetryable(Throwable e) {
-        if (e == null) return false;
+    private FailureType classify(Throwable e) {
+        if (e == null) return FailureType.NON_RETRYABLE;
         String name = e.getClass().getSimpleName();
         String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
         if (name.contains("ProvisionedThroughputExceededException") ||
@@ -165,9 +180,12 @@ public final class Backfill {
             name.contains("RequestLimitExceeded") ||
             msg.contains("rate limit") || msg.contains("throughput") ||
             msg.contains("timeout")) {
-            return true;
+            return FailureType.RETRYABLE;
         }
-        return isRetryable(e.getCause());
+        if (e.getCause() != null) {
+            return classify(e.getCause());
+        }
+        return FailureType.NON_RETRYABLE;
     }
 
     public enum Status {
@@ -177,6 +195,17 @@ public final class Backfill {
         INTERRUPTED
     }
 
+    public enum FailureType {
+        RETRYABLE,
+        NON_RETRYABLE
+    }
+
     public record Result(long read, long written, long skipped, long failed,
-                         boolean timedOut, Status status, boolean executorTerminated) {}
+                         boolean timedOut, Status status, boolean executorTerminated,
+                         List<FailureDetail> failureDetails) {}
+
+    public record FailureDetail(String account, String month, String transactionId,
+                                int attempts, long processedCount, long failedCount,
+                                FailureType failureType, String errorType,
+                                String errorMessage, boolean finalSuccess) {}
 }

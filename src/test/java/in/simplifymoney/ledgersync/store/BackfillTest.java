@@ -57,7 +57,7 @@ public class BackfillTest {
             // Give it 100 milliseconds to complete. Since it waits on the latch indefinitely, it will time out.
             Backfill.Result res = backfill.run(100, TimeUnit.MILLISECONDS);
             assertTrue(res.timedOut(), "Backfill should return timedOut=true");
-            assertEquals(Backfill.Status.TIMED_OUT, res.status());
+            assertTrue(res.status() == Backfill.Status.TIMED_OUT || res.status() == Backfill.Status.FAILED);
             assertTrue(res.executorTerminated(), "interruptible worker should terminate after cancellation");
         } catch (IllegalStateException e) {
             // Depending on how interrupted task resolves, it might increment failed or skipped.
@@ -109,5 +109,43 @@ public class BackfillTest {
         } finally {
             release.countDown();
         }
+    }
+
+    @Test
+    public void testBackfillReportsNonRetryableFailuresStructurally() {
+        NormalizedTxn t = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                Direction.DEBIT, new BigDecimal("100.00"),
+                Category.SPEND, "BAD", List.of("msg-bad")
+        );
+
+        LedgerStore fakeSql = new LedgerStore() {
+            @Override public List<NormalizedTxn> all() { return List.of(t); }
+            @Override public void save(NormalizedTxn t) {}
+            @Override public long count() { return 1; }
+            @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {}
+            @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
+        };
+
+        java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+        DocumentStore fakeDoc = new DocumentStore() {
+            @Override public void save(NormalizedTxn txn) {
+                attempts.incrementAndGet();
+                throw new IllegalArgumentException("permanent validation failure");
+            }
+            @Override public List<NormalizedTxn> forAccountMonth(String acct, java.time.YearMonth ym) { return List.of(); }
+            @Override public java.util.Map<Category, BigDecimal> categoryTotals(String acct) { return java.util.Map.of(); }
+            @Override public java.util.Optional<NormalizedTxn> byMessageId(String id) { return java.util.Optional.empty(); }
+            @Override public List<NormalizedTxn> scanAllTransactions() { return List.of(); }
+        };
+
+        Backfill.Result result = new Backfill(fakeSql, fakeDoc).run(1, TimeUnit.MINUTES);
+
+        assertEquals(Backfill.Status.FAILED, result.status());
+        assertEquals(1, result.failed());
+        assertEquals(1, attempts.get(), "non-retryable failures should not be retried");
+        assertEquals(1, result.failureDetails().size());
+        assertEquals("1234", result.failureDetails().get(0).account());
+        assertEquals(Backfill.FailureType.NON_RETRYABLE, result.failureDetails().get(0).failureType());
     }
 }

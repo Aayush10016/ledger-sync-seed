@@ -161,13 +161,13 @@ public class IngestServiceTest {
                 OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
                 in.simplifymoney.ledgersync.model.Direction.DEBIT,
                 new java.math.BigDecimal("1000.00"),
-                Category.SPEND, "SRC", java.util.List.of("tf-1"));
+                Category.SPEND, "IMPS/P2A/PARAG KAPOOR", java.util.List.of("tf-1"));
         NormalizedTxn credit = new NormalizedTxn(
                 "3310",
-                OffsetDateTime.parse("2026-07-10T10:01:00+05:30"),
+                OffsetDateTime.parse("2026-07-10T10:02:00+05:30"),
                 in.simplifymoney.ledgersync.model.Direction.CREDIT,
                 new java.math.BigDecimal("1000.00"),
-                Category.INCOME, "DST", java.util.List.of("tf-2"));
+                Category.INCOME, "IMPS/P2A/PARAG KAPOOR", java.util.List.of("tf-2"));
 
         java.util.List<NormalizedTxn> txns = new java.util.ArrayList<>(java.util.List.of(debit, credit));
         IngestService.categorizeTransfers(txns);
@@ -192,7 +192,7 @@ public class IngestServiceTest {
                 OffsetDateTime.parse("2026-07-10T10:10:00+05:30"),
                 in.simplifymoney.ledgersync.model.Direction.CREDIT,
                 new java.math.BigDecimal("500.00"),
-                Category.INCOME, "SALARY", java.util.List.of("unrelated-2"));
+                Category.INCOME, "IMPS/P2A/PARAG KAPOOR", java.util.List.of("unrelated-2"));
 
         java.util.List<NormalizedTxn> txns = new java.util.ArrayList<>(java.util.List.of(debit, credit));
         IngestService.categorizeTransfers(txns);
@@ -201,6 +201,28 @@ public class IngestServiceTest {
                 "Debit should NOT become TRANSFER when time gap > 5 minutes");
         assertNotEquals(Category.TRANSFER, txns.get(1).category(),
                 "Credit should NOT become TRANSFER when time gap > 5 minutes");
+    }
+
+    @Test
+    public void weakSameAmountOppositeDirectionEvidenceIsNotTransfer() {
+        NormalizedTxn debit = new NormalizedTxn(
+                "4821",
+                OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
+                Direction.DEBIT,
+                new java.math.BigDecimal("500.00"),
+                Category.SPEND, "STORE", java.util.List.of("weak-1"));
+        NormalizedTxn credit = new NormalizedTxn(
+                "9075",
+                OffsetDateTime.parse("2026-07-10T10:01:00+05:30"),
+                Direction.CREDIT,
+                new java.math.BigDecimal("500.00"),
+                Category.INCOME, "CASHBACK", java.util.List.of("weak-2"));
+
+        java.util.List<NormalizedTxn> txns = new java.util.ArrayList<>(java.util.List.of(debit, credit));
+        IngestService.categorizeTransfers(txns);
+
+        assertNotEquals(Category.TRANSFER, txns.get(0).category());
+        assertNotEquals(Category.TRANSFER, txns.get(1).category());
     }
 
     @Test
@@ -237,6 +259,65 @@ public class IngestServiceTest {
         service.ingestFile(corpus);
         
         assertEquals(2, store.count());
+    }
+
+    @Test
+    public void selectedMerchantAndCategoryDoNotDependOnInputOrder() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        String sms = "{\"message_id\":\"sms-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00+05:30\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UPI/WATER CAN.\"}";
+        String email = "{\"message_id\":\"email-1\",\"channel\":\"email\",\"sender\":\"alerts@hdfcbank.net\",\"received_at\":\"2024-05-15T10:00:05+05:30\",\"device_id\":\"d1\",\"body\":\"Date: Wed, 15 May 2024 10:00:00 +0530\\nSubject: Transaction alert\\n\\nYour account ending 1234 has been debited with INR 50.00.\\nMerchant / Remarks: Water Can\"}";
+
+        Path smsFirst = tempDir.resolve("sms-first.jsonl");
+        Path emailFirst = tempDir.resolve("email-first.jsonl");
+        Files.writeString(smsFirst, sms + "\n" + email + "\n");
+        Files.writeString(emailFirst, email + "\n" + sms + "\n");
+
+        InMemoryLedgerStore smsFirstStore = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), smsFirstStore).ingestFile(smsFirst);
+        InMemoryLedgerStore emailFirstStore = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), emailFirstStore).ingestFile(emailFirst);
+
+        assertEquals(1, smsFirstStore.count());
+        assertEquals(1, emailFirstStore.count());
+        assertEquals("Water Can", smsFirstStore.all().get(0).merchant());
+        assertEquals("Water Can", emailFirstStore.all().get(0).merchant());
+        assertEquals(Category.MICRO, smsFirstStore.all().get(0).category());
+        assertEquals(Category.MICRO, emailFirstStore.all().get(0).category());
+    }
+
+    @Test
+    public void malformedRecordsAreAccountedForSeparately() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("malformed.jsonl");
+
+        String valid = "{\"message_id\":\"valid-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER.\"}";
+        Files.writeString(corpus, valid + "\n{\"message_id\":\"bad\"\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService.Stats stats = new IngestService(new Parsers(), store).ingestFile(corpus);
+
+        assertEquals(2, stats.messagesRead());
+        assertEquals(1, stats.malformedRecords());
+        assertEquals(2, stats.malformedDetails().get(0).lineNumber());
+        assertEquals(1, store.count());
+    }
+
+    @Test
+    public void unreliableBalanceAccountsAreConfigurable() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("card.jsonl");
+
+        String first = "{\"message_id\":\"card-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 spent on HDFC Bank Card x3310 at STORE on 15-05-24 10:00. Avl Limit: Rs.1000.00.\"}";
+        String second = "{\"message_id\":\"card-2\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:10:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 spent on HDFC Bank Card x3310 at STORE on 15-05-24 10:10. Avl Limit: Rs.800.00.\"}";
+        Files.writeString(corpus, first + "\n" + second + "\n");
+
+        InMemoryLedgerStore defaultStore = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), defaultStore).ingestFile(corpus);
+        assertEquals(0, defaultStore.discrepancies().size());
+
+        InMemoryLedgerStore configuredStore = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), configuredStore, java.util.Set.of()).ingestFile(corpus);
+        assertEquals(1, configuredStore.discrepancies().size());
     }
 
 }

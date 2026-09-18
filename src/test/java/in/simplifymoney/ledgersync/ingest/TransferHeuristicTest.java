@@ -20,14 +20,14 @@ public class TransferHeuristicTest {
         
         OffsetDateTime t1 = OffsetDateTime.parse("2026-07-04T10:00:00Z");
         
-        NormalizedTxn debit1 = new NormalizedTxn("1111", t1, Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "Merch", List.of("m1"));
-        NormalizedTxn credit1 = new NormalizedTxn("2222", t1.plusSeconds(30), Direction.CREDIT, new BigDecimal("500.00"), Category.INCOME, "Merch", List.of("m2"));
+        NormalizedTxn debit1 = new NormalizedTxn("1111", t1, Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "IMPS/P2A/PARAG KAPOOR", List.of("m1"));
+        NormalizedTxn credit1 = new NormalizedTxn("2222", t1.plusSeconds(30), Direction.CREDIT, new BigDecimal("500.00"), Category.INCOME, "IMPS/P2A/PARAG KAPOOR", List.of("m2"));
         
-        NormalizedTxn debit2 = new NormalizedTxn("1111", t1.plusSeconds(60), Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "Merch", List.of("m3"));
-        NormalizedTxn credit2 = new NormalizedTxn("2222", t1.plusSeconds(90), Direction.CREDIT, new BigDecimal("500.00"), Category.INCOME, "Merch", List.of("m4"));
+        NormalizedTxn debit2 = new NormalizedTxn("1111", t1.plusSeconds(60), Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "IMPS/P2A/PARAG KAPOOR", List.of("m3"));
+        NormalizedTxn credit2 = new NormalizedTxn("2222", t1.plusSeconds(90), Direction.CREDIT, new BigDecimal("500.00"), Category.INCOME, "IMPS/P2A/PARAG KAPOOR", List.of("m4"));
 
         // Add a third debit with NO matching credit
-        NormalizedTxn debit3 = new NormalizedTxn("1111", t1.plusSeconds(120), Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "Merch", List.of("m5"));
+        NormalizedTxn debit3 = new NormalizedTxn("1111", t1.plusSeconds(120), Direction.DEBIT, new BigDecimal("500.00"), Category.SPEND, "IMPS/P2A/PARAG KAPOOR", List.of("m5"));
 
         List<NormalizedTxn> txns = new java.util.ArrayList<>(List.of(debit1, credit1, debit2, credit2, debit3));
         

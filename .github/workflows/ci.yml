@@ -37,6 +37,39 @@ jobs:
       
       - name: Run unit and integration tests
         run: ./gradlew clean test
+
+      - name: Assert DynamoDB integration tests executed
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          results = pathlib.Path("build/test-results/test")
+          total = skipped = failures = errors = 0
+          dynamo = None
+          for file in results.glob("TEST-*.xml"):
+              suite = ET.parse(file).getroot()
+              tests = int(suite.attrib.get("tests", 0))
+              skips = int(suite.attrib.get("skipped", 0))
+              fails = int(suite.attrib.get("failures", 0))
+              errs = int(suite.attrib.get("errors", 0))
+              total += tests
+              skipped += skips
+              failures += fails
+              errors += errs
+              if suite.attrib.get("name", "").endswith("DynamoDbLedgerStoreIntegrationTest"):
+                  dynamo = (tests, skips, fails, errs)
+
+          print(f"JUnit summary: tests={total}, skipped={skipped}, failures={failures}, errors={errors}")
+          if dynamo is None:
+              print("DynamoDbLedgerStoreIntegrationTest did not produce a JUnit result", file=sys.stderr)
+              sys.exit(1)
+          tests, skips, fails, errs = dynamo
+          print(f"DynamoDB integration: tests={tests}, skipped={skips}, failures={fails}, errors={errs}")
+          if tests == 0 or skips != 0 or fails != 0 or errs != 0:
+              sys.exit(1)
+          PY
         
       - name: compile and self-check
         run: ./verify.sh

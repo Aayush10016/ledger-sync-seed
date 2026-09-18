@@ -128,10 +128,10 @@ Run it:
 ./gradlew run --args="report submission/"
 ```
 
-`./verify.sh` produces 256 transactions with balances that match the bank-stated closing
-balances in `fixtures/corpus-a-totals.json`. The fixture's expected count of 257 includes 
-a missing 7500.00 transaction that is accurately reported in discrepancies, and a historical 
-phantom duplicate now resolved by deduplication.
+`./verify.sh` produces 256 observed transactions, matching
+`fixtures/corpus-a-totals.json`. The known missing `7500.00` debit is not
+fabricated as a transaction; it is reported as an allowed reconciliation
+discrepancy with source-message evidence.
 
 ---
 
@@ -149,6 +149,8 @@ All items below have been implemented:
 4. **Categories** are assigned correctly: `MICRO` for UPI debits ≤ ₹100,
    `TRANSFER` for matched cross-account opposite-direction equal-amount pairs
    within 5 minutes, `SPEND` / `INCOME` otherwise.
+   Transfer classification now also requires transfer-reference evidence; amount
+   and timing alone are not enough.
 5. **`Reports.summary`** produces correct per-account spend, income, micro
    rollup, and transferred-in / transferred-out totals.
 6. **`Reports.reconciliation`** serialises the balance-gap discrepancies detected
@@ -245,8 +247,8 @@ so the message lookup metric reports the deterministic point-read call count.
    - *Why:* Some transactions arriving via both SMS and Email represented the same instant in time but had different UTC offsets (e.g., `+05:30` vs `Z`). By converting them to Epoch Seconds before comparing, we successfully group identical cross-channel alerts without falsely merging separate transactions that just happen to occur close to each other. We purposefully omit `merchant` from the deduplication key because different channels report merchant names differently (e.g., `UPI/WATER CAN` via SMS vs `Water Can` via Email). While this risks merging two *genuinely different* transactions if they occur at the *exact same second* with the *exact same amount* for the *same account*, it is the safest heuristic to prevent mass duplication given the absence of unique bank reference numbers.
 
 3. **TRANSFER Detection Heuristic Safety**
-   - *Decision:* Rely on opposite direction transactions of identical amounts within 5 minutes across different accounts to detect transfers.
-   - *Why:* Because the entire corpus (and service scope) represents alerts originating from a *single user's phone*, we can safely assume all accounts belong to that user. This makes identifying self-transfers safe and accurate without needing external account metadata.
+   - *Decision:* Require transfer-reference evidence, such as matching `IMPS/P2A` or `NEFT` merchant/reference text, in addition to opposite directions, identical amounts, different accounts, and a short time window.
+   - *Why:* Timing and amount alone are weak evidence and can classify unrelated spend/income as transfers. Reference text makes the heuristic conservative while preserving the known self-transfer pairs in the corpus.
 
 4. **Bi-Directional Consistency Verification & Enumeration Limits**
    - *Decision:* Implemented a strict size and element-wise comparison between the `sqlList` and `docList` in `ConsistencyChecker`.
@@ -255,16 +257,16 @@ so the message lookup metric reports the deterministic point-read call count.
    - *Limitation (Undetectable Corruptions):* Because the frozen `DocumentStore` interface prohibits an unconstrained `client.scan()`, it is mathematically impossible to discover a deliberately inserted "ghost" account that SQL has never heard of, or a "ghost" month for an existing account outside of its active SQL months. The Consistency Checker provides the strongest proof possible strictly within the bounds of the 3 authorized queries.
 
 4. **Resilient Ingestion Parsing**
-   - *Decision:* Wrapped parser execution in `IngestService` with a broad `try/catch` and skipped-counter increment.
-   - *Why:* A single malformed message from a host API should not crash the entire batch ingestion pipeline.
+   - *Decision:* `IngestService` records unsupported messages separately from malformed JSONL records. `SelfCheck` fails if malformed records are present unexpectedly.
+   - *Why:* Every input record must be accounted for as valid, skipped with a reason, or malformed with a line-number diagnostic.
 
 5. **Idempotency in Backfill**
-   - *Decision:* Leveraged DynamoDB's `TransactWriteItems` condition failures.
-   - *Why:* If the `Backfill` job fails partially and is restarted, we rely on DynamoDB transactions natively failing their conditions for already-processed items. This is handled gracefully inside `DynamoDbLedgerStore`, preventing duplicate creation while correctly resuming progress.
+   - *Decision:* Leveraged DynamoDB's `TransactWriteItems` condition failures and explicit retry classification. `Backfill.Result` includes per-failure details with account, month, attempts, transaction id, failure type, and error text.
+   - *Why:* If the `Backfill` job fails partially and is restarted, we rely on DynamoDB transactions natively failing their conditions for already-processed items. Structured failures make any remaining errors actionable without scraping unstructured logs.
 
-6. **The `257` vs `256` Transactions "Trap"**
-   - *Observation:* The `corpus-a-totals.json` expects 257 transactions. However, with robust deduplication, my ledger correctly produces 256.
-   - *Why:* There is a single `412.67` transaction on `2026-07-19` that generated both an SMS (at `00:20 IST`) and an Email (at `18:50 UTC`). Because `+05:30` and `Z` parse as unequal string representations, the original baseline deduplication algorithm failed to deduplicate them, inserting a phantom duplicate and inflating the count to 257. By modifying `IngestService` to use `.toEpochSecond()` in the deduplication key, I successfully merged the alerts (offset-independently), resulting in a historically accurate ledger of 256 real transactions. 
+6. **The historical `257` vs `256` transaction trap**
+   - *Observation:* The current fixture expects 256 observed transactions. Earlier reports that expected 257 were stale.
+   - *Why:* The missing `7500.00` debit is not present as a raw bank alert, so creating a 257th ledger row would fabricate a transaction. The pipeline reports it as a discrepancy instead.
 
 7. **The 7500.00 Discrepancy (Account 4821)**
    - *Observation:* `ConsistencyChecker` reports a massive `-7500.00` discrepancy on `2026-07-29`. 
@@ -296,8 +298,11 @@ transaction identity and query-specific consistency checks.
   document-only, duplicate identity, source collision, and field-level mismatch
   divergences, and emits deterministic ordering.
 - `Backfill.Result` now includes lifecycle status and executor termination
-  observation. `shutdownNow()` is treated as a cancellation request, not proof
-  that blocked work physically stopped.
+  observation plus structured failure details. `shutdownNow()` is treated as a
+  cancellation request, not proof that blocked work physically stopped.
+- Balance reliability exclusions are configurable through
+  `ledger.accounts-without-reliable-balances`; the default excludes card account
+  `3310`, whose messages provide available limit rather than account balance.
 - `verify.sh` still proves only the offline non-Dynamo compile and `SelfCheck`
   path. It does not compile `DynamoDbLedgerStore.java`, does not exercise
   DynamoDB Local, and does not prove integration behavior.
@@ -308,7 +313,7 @@ Current implementation focus:
 
 - Task 2 ingestion parses SMS and email alerts, excludes non-transaction messages that do not match supported bank formats, deduplicates within a corpus, preserves source-message IDs, and emits `ledger.json`, `summary.json`, and `reconciliation.json`.
 - Task 3 incident prevention is in `Amounts`: integer amounts such as `Rs.5` are parsed as the transaction amount, while `Avl Bal` is parsed only by the balance-specific regex.
-- Task 4 uses DynamoDB Local through Docker Compose. CI starts it before integration tests and fails if it cannot be reached.
+- Task 4 uses DynamoDB Local through Docker Compose. CI starts it before integration tests, fails if it cannot be reached, and asserts that the DynamoDB integration suite did not skip.
 
 Document-store access patterns:
 

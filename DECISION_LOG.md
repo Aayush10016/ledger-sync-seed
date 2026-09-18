@@ -32,8 +32,8 @@ Evidence: integration tests force one-item pages and verify no missing results.
 
 ## 6. Backfill
 Problem: SQL may contain historical duplicates and backfill may be rerun.
-Decision: deduplicate by transaction identity before writing, rely on idempotent document-store save, and report timeout/termination state explicitly.
-Evidence: backfill tests cover timeout and interruption behavior; end-to-end test backfills then runs consistency check.
+Decision: deduplicate by transaction identity before writing, rely on idempotent document-store save, classify retryable versus non-retryable failures explicitly, and report timeout/termination/failure details structurally.
+Evidence: backfill tests cover timeout, interruption behavior, unterminated workers, and non-retryable failure details; end-to-end test backfills then runs consistency check.
 
 ## 7. Consistency checking
 Problem: evaluator may mutate DynamoDB records, indexes, or totals.
@@ -54,7 +54,7 @@ Evidence: amount tests cover `Rs.5`, multiple monetary values, available balance
 
 ## 10. CI and verification
 Problem: CI previously did not run from push events and lacked a working wrapper/readiness setup.
-Decision: add Gradle wrapper, Java 21 toolchain, DynamoDB dummy AWS credentials, explicit readiness loop, and manual workflow verification.
+Decision: add Gradle wrapper, Java 21 toolchain, DynamoDB dummy AWS credentials, explicit readiness loop, manual workflow verification, and a JUnit XML assertion that DynamoDB integration tests executed without skips.
 Evidence: workflow run `35353694066` passed on commit `c8a6bc0`. The workflow run reference here is intentionally historical — the latest CI results must be read from the Actions tab on the fork, not from this file.
 
 ## 11. SQL/DynamoDB compatibility parity and BigDecimal transfer matching
@@ -63,3 +63,10 @@ Decision: extend SQL compatibility check to include category and merchant, match
 
 Problem 2: `categorizeTransfers()` used `BigDecimal.equals()` for amount comparison. `BigDecimal.equals()` is scale-sensitive: `1000.0` does not equal `1000.00`. Transfer pairs from amounts parsed with different decimal precision would silently not be classified as transfers.
 Decision: use `compareTo() == 0` throughout. Tests added: `transferDetectionMatchesDifferentScalesViaCompareTo` and `unrelatedTransactionsOutsideTimeWindowAreNotTransfers`.
+
+## 12. Ingestion grouping, balances, and transfer evidence
+Problem: grouping and categorization could become order-dependent or rely on weak evidence.
+Decision: preserve source-message ownership as the primary durable identity; within one ingestion run, group exact duplicate messages and SMS/email corroboration only, never same-channel different bodies. Select merchant deterministically from the best available group evidence and derive `MICRO` from any UPI evidence in the group.
+Balance configuration: account balance-gap checks use `ledger.accounts-without-reliable-balances` to exclude accounts whose alerts report limits rather than balances. The default is `3310`.
+Transfer decision: classify `TRANSFER` only when amount/time/opposite-direction evidence is backed by matching transfer-reference text such as `IMPS/P2A` or `NEFT`.
+Evidence: ingestion tests cover order-independent merchant/category selection, same-channel collision preservation, configurable balance exclusions, malformed record accounting, and weak transfer evidence remaining non-transfer.

@@ -27,16 +27,28 @@ import java.util.stream.Stream;
  */
 public final class IngestService {
 
+    private static final String BALANCE_EXCLUSION_PROPERTY =
+            "ledger.accounts-without-reliable-balances";
+    private static final String DEFAULT_BALANCE_EXCLUSIONS = "3310";
+
     private final Parsers parsers;
     private final LedgerStore store;
+    private final java.util.Set<String> accountsWithoutReliableBalances;
 
     public IngestService(Parsers parsers, LedgerStore store) {
+        this(parsers, store, configuredAccountsWithoutReliableBalances());
+    }
+
+    public IngestService(Parsers parsers, LedgerStore store,
+                         java.util.Set<String> accountsWithoutReliableBalances) {
         this.parsers = parsers;
         this.store = store;
+        this.accountsWithoutReliableBalances = java.util.Set.copyOf(accountsWithoutReliableBalances);
     }
 
     public Stats ingestFile(Path corpus) throws IOException {
-        List<RawMessage> messages = readCorpus(corpus);
+        CorpusReadResult readResult = readCorpusDetailed(corpus);
+        List<RawMessage> messages = readResult.validRecords();
         List<ParsedTxn> parsedTxns = new ArrayList<>();
         List<SkipDetail> skipDetails = new ArrayList<>();
         
@@ -75,15 +87,23 @@ public final class IngestService {
             }
         }
 
-        return new Stats(messages.size(), written, skipDetails.size(), failedWrites, skipDetails);
+        return new Stats(readResult.recordsRead(), written, skipDetails.size(), failedWrites,
+                skipDetails, readResult.malformedRecords(), readResult.malformedDetails());
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
+        return readCorpusDetailed(corpus).validRecords();
+    }
+
+    public static CorpusReadResult readCorpusDetailed(Path corpus) throws IOException {
         List<RawMessage> out = new ArrayList<>();
+        List<MalformedRecord> malformed = new ArrayList<>();
+        int recordsRead = 0;
         try (Stream<String> lines = Files.lines(corpus)) {
             int lineNum = 0;
             for (String line : (Iterable<String>) lines.filter(s -> !s.isBlank())::iterator) {
                 lineNum++;
+                recordsRead++;
                 try {
                     Map<String, Object> o = Json.parseObject(line);
                     
@@ -100,11 +120,17 @@ public final class IngestService {
                             (String) o.get("device_id"),
                             (String) o.get("body")));
                 } catch (Exception e) {
-                    System.err.println("Failed to load record at line " + lineNum + ": " + e.getMessage());
+                    malformed.add(new MalformedRecord(lineNum, e.getMessage(), line));
                 }
             }
         }
-        return out;
+        if (!malformed.isEmpty()) {
+            System.err.println("Malformed corpus records: " + malformed.size());
+            for (MalformedRecord record : malformed) {
+                System.err.println("- line " + record.lineNumber() + ": " + record.reason());
+            }
+        }
+        return new CorpusReadResult(recordsRead, out, malformed);
     }
 
     private List<NormalizedTxn> deduplicateAndCategorize(List<ParsedTxn> parsed, List<RawMessage> raws) {
@@ -154,7 +180,7 @@ public final class IngestService {
                         }
                     }
 
-                    if (!balancesConflict && !channelConflict) {
+                    if (!balancesConflict && !channelConflict && canGroup(rawP, group, rawMap)) {
                         group.add(p);
                         added = true;
                         break;
@@ -180,8 +206,8 @@ public final class IngestService {
             for (ParsedTxn item : group) {
                 ids.add(item.sourceMessageId());
             }
-            Category c = determineCategory(first);
             String bestMerchant = chooseBestMerchant(group, rawMap);
+            Category c = determineCategory(group, bestMerchant);
             out.add(new NormalizedTxn(
                     first.accountLast4(),
                     first.occurredAt(),
@@ -196,7 +222,8 @@ public final class IngestService {
         List<in.simplifymoney.ledgersync.model.Discrepancy> existingDisc = store.discrepancies();
         java.util.Set<String> existingDiscKeys = new java.util.HashSet<>();
         for (in.simplifymoney.ledgersync.model.Discrepancy d : existingDisc) {
-            existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount() + "|" + d.note());
+            existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt() + "|"
+                    + d.amount() + "|" + d.note());
         }
 
         Map<String, List<NormalizedTxn>> byAcct = new java.util.LinkedHashMap<>();
@@ -204,8 +231,6 @@ public final class IngestService {
             byAcct.computeIfAbsent(t.accountLast4(), k -> new ArrayList<>()).add(t);
         }
         
-        java.util.Set<String> accountsWithoutReliableBalances = java.util.Set.of("3310");
-
         for (Map.Entry<String, List<NormalizedTxn>> entry : byAcct.entrySet()) {
             String acct = entry.getKey();
             if (accountsWithoutReliableBalances.contains(acct)) continue;
@@ -234,11 +259,15 @@ public final class IngestService {
                         java.math.BigDecimal expected = lastBalance.add(sumSinceLastBalance);
                         if (expected.compareTo(statedBal) != 0) {
                             java.math.BigDecimal diff = statedBal.subtract(expected);
+                            String sourceEvidence = String.join(",", t.sourceMessageIds());
                             in.simplifymoney.ledgersync.model.Discrepancy d = new in.simplifymoney.ledgersync.model.Discrepancy(
                                     acct, t.occurredAt(), diff,
-                                    "ledger computed " + expected.toPlainString() + " but bank reported " + statedBal.toPlainString()
+                                    "type=balance-gap; sources=" + sourceEvidence
+                                            + "; ledger computed " + expected.toPlainString()
+                                            + " but bank reported " + statedBal.toPlainString()
                             );
-                            String dKey = d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount() + "|" + d.note();
+                            String dKey = d.accountLast4() + "|" + d.occurredAt() + "|"
+                                    + d.amount() + "|" + d.note();
                             if (!existingDiscKeys.contains(dKey)) {
                                 store.save(d);
                                 existingDiscKeys.add(dKey);
@@ -269,10 +298,11 @@ public final class IngestService {
 
                 if (!t1.accountLast4().equals(t2.accountLast4()) &&
                     t1.amount().compareTo(t2.amount()) == 0 &&
-                    t1.direction() != t2.direction()) {
+                    t1.direction() != t2.direction() &&
+                    hasTransferEvidence(t1, t2)) {
                     
                     long diff = Math.abs(t1.occurredAt().toEpochSecond() - t2.occurredAt().toEpochSecond());
-                    if (diff <= 60) {
+                    if (diff <= 300) {
                         out.set(i, withCategory(t1, Category.TRANSFER));
                         out.set(j, withCategory(t2, Category.TRANSFER));
                         break;
@@ -280,6 +310,23 @@ public final class IngestService {
                 }
             }
         }
+    }
+
+    private boolean canGroup(RawMessage rawP, List<ParsedTxn> group, Map<String, RawMessage> rawMap) {
+        if (rawP == null) return false;
+        for (ParsedTxn item : group) {
+            RawMessage rawItem = rawMap.get(item.sourceMessageId());
+            if (rawItem == null) continue;
+            if (rawP.body().equals(rawItem.body())) {
+                return true;
+            }
+            boolean crossChannel = !rawP.channel().equals(rawItem.channel());
+            if (crossChannel && ("sms".equals(rawP.channel()) || "sms".equals(rawItem.channel()))
+                    && ("email".equals(rawP.channel()) || "email".equals(rawItem.channel()))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String chooseBestMerchant(List<ParsedTxn> group, Map<String, RawMessage> rawMap) {
@@ -304,9 +351,14 @@ public final class IngestService {
         return best;
     }
 
-    private Category determineCategory(ParsedTxn p) {
-        if (p.direction() == Direction.DEBIT) {
-            if (p.amount().compareTo(new java.math.BigDecimal("100")) <= 0 && isUpi(p)) {
+    private Category determineCategory(List<ParsedTxn> group, String selectedMerchant) {
+        ParsedTxn first = group.get(0);
+        if (first.direction() == Direction.DEBIT) {
+            boolean upiEvidence = isUpi(selectedMerchant);
+            for (ParsedTxn p : group) {
+                upiEvidence = upiEvidence || isUpi(p.merchant());
+            }
+            if (first.amount().compareTo(new java.math.BigDecimal("100")) <= 0 && upiEvidence) {
                 return Category.MICRO;
             }
             return Category.SPEND;
@@ -315,8 +367,40 @@ public final class IngestService {
         }
     }
 
-    private boolean isUpi(ParsedTxn p) {
-        return p.merchant() != null && p.merchant().toUpperCase().contains("UPI");
+    private boolean isUpi(String merchant) {
+        return merchant != null && merchant.toUpperCase().contains("UPI");
+    }
+
+    private static boolean hasTransferEvidence(NormalizedTxn left, NormalizedTxn right) {
+        String leftMerchant = normalizeTransferMerchant(left.merchant());
+        String rightMerchant = normalizeTransferMerchant(right.merchant());
+        return !leftMerchant.isBlank()
+                && leftMerchant.equals(rightMerchant)
+                && (leftMerchant.contains("IMPS/P2A") || leftMerchant.contains("NEFT"));
+    }
+
+    private static String normalizeTransferMerchant(String merchant) {
+        if (merchant == null) return "";
+        String normalized = merchant.toUpperCase(java.util.Locale.ROOT)
+                .replace("TO:", "")
+                .replace("FROM:", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (normalized.startsWith("SENT ")) normalized = normalized.substring(5).trim();
+        if (normalized.startsWith("RECEIVED ")) normalized = normalized.substring(9).trim();
+        return normalized;
+    }
+
+    private static java.util.Set<String> configuredAccountsWithoutReliableBalances() {
+        String raw = System.getProperty(BALANCE_EXCLUSION_PROPERTY, DEFAULT_BALANCE_EXCLUSIONS);
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (String item : raw.split(",")) {
+            String account = item.trim();
+            if (!account.isBlank()) {
+                out.add(account);
+            }
+        }
+        return out;
     }
 
     /**
@@ -343,7 +427,18 @@ public final class IngestService {
                 t.amount(), c, t.merchant(), t.sourceMessageIds());
     }
 
-    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped, int failedWrites, List<SkipDetail> skipDetails) {}
+    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped,
+                        int failedWrites, List<SkipDetail> skipDetails,
+                        int malformedRecords, List<MalformedRecord> malformedDetails) {}
     
     public record SkipDetail(String messageId, String reason) {}
+
+    public record MalformedRecord(int lineNumber, String reason, String rawRecord) {}
+
+    public record CorpusReadResult(int recordsRead, List<RawMessage> validRecords,
+                                   List<MalformedRecord> malformedDetails) {
+        public int malformedRecords() {
+            return malformedDetails.size();
+        }
+    }
 }

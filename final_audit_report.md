@@ -1,36 +1,35 @@
-# Final Correctness Audit — Current State
+# Final Correctness Audit - Current State
 
-This report reflects the implementation state after the complete audit and fix pass.
-Current commit inspected: `834fd623` (parent), changes applied in this pass.
+This report reflects the implementation state after the latest correctness pass.
 
-## Issues Confirmed and Fixed in This Pass
+## Confirmed Current Behavior
 
-| Issue | Severity | Evidence |
-| --- | --- | --- |
-| `categorizeTransfers()` used `BigDecimal.equals()` (scale-sensitive) | P1 | `IngestService.java` line 287 changed from `.equals()` to `.compareTo() == 0`. `transferDetectionMatchesDifferentScalesViaCompareTo` test added. |
-| `SqlLedgerStore.validateCompatibleIdentity()` did not check category or merchant | P1 | Lines 224–231 updated to match `DynamoDbLedgerStore.isCompatible()`. `conflictingCategoryForOwnedSourceIsRejected` and `conflictingMerchantForOwnedSourceIsRejected` tests added to `SqlLedgerStoreTest`. |
-| Stale `Reports.java` class comment claimed reconciliation not written | P2 | Updated to describe the correct implemented state. |
-| Stale `README.md` "What is missing" section | P2 | Section replaced with "Current implementation state" listing all implemented components. `verify.sh` count claim corrected from 323 to 257. |
-| Incident `INC-2026-09-11.md` status still "OPEN" | P2 | Status changed to RESOLVED with date and fix summary. |
-| `DynamoDbLedgerAdapter` discrepancy in-memory design undocumented | P3 | Javadoc added explaining why DynamoDB has no durable discrepancy partition in this scope. |
-| DECISION_LOG entry 10 references stale workflow run | P3 | Disclaimer added noting the CI run reference is historical; readers must check Actions tab. Entry 11 added for the BigDecimal and SQL compatibility fixes. |
+- `fixtures/corpus-a-totals.json` expects 256 observed transactions, not 257.
+- The missing `7500.00` debit is represented as an allowed balance-gap discrepancy, not as a fabricated ledger transaction.
+- `SelfCheck` fails on transaction-count mismatches, unexpected discrepancies, failed writes, or malformed input records.
+- DynamoDB integration tests are required in CI; the workflow now fails if the DynamoDB integration suite is absent or skipped.
 
-## Previously Fixed Issues (Retained)
+## Fixes in This Pass
 
-| Issue | Status |
+| Area | Fix |
 | --- | --- |
-| Reconciliation gaps synthesized as fake ledger transactions | FIXED — `IngestService` saves only observed transactions; balance gaps are `Discrepancy` records |
-| UUID-based reconciliation identity | FIXED — deterministic discrepancy deduplication via account+epoch+amount key |
-| `SqlLedgerStore.save()` DELETE-then-INSERT with no unique constraint | FIXED — MERGE INTO on txn_id + ledger_sources ownership index |
-| No idempotency test for repeated in-memory ingestion | FIXED — `testReingestionIdempotency` in `IngestServiceTest` |
-| DynamoDB race on concurrent identical writes | FIXED — TransactWriteItems with conditional-write + retry on cancellation |
-| End-to-end test only did backfill before consistency check | FIXED — `EndToEndTest` ingests corpora directly into DynamoDB first |
-| PerfTest hid write errors and lacked measured counters | FIXED — fails on any write error; prints real `ScannedCount`/`Count` + GetItem call counts |
-| Incident blast radius unverified | FIXED — exactly 38 corpus-a messages locked by `AmountsTest.corpusABlastRadiusForLegacyWholeRupeeBugIsExact` |
+| Same-second grouping | Same-channel different-body messages remain separate; same-run grouping is limited to exact duplicates and SMS/email corroboration. |
+| Merchant/category selection | Merchant is chosen deterministically from the most informative group evidence; `MICRO` uses any UPI evidence in the merged group, so input order does not decide category. |
+| Transfer detection | Timing and amount are no longer sufficient. Transfer classification also requires matching transfer-reference text such as `IMPS/P2A` or `NEFT`. |
+| Account 3310 balance handling | Balance reliability exclusions are configurable through `ledger.accounts-without-reliable-balances`; default remains `3310` because card alerts report available limit rather than account balance. |
+| Discrepancy identity | Balance-gap discrepancy notes now include type and source-message evidence, and deduplication uses stored discrepancy fields so reruns remain idempotent. |
+| Malformed records | JSONL read accounting now returns valid records plus malformed line diagnostics; ingestion stats expose malformed counts. |
+| Backfill reporting | Backfill now returns structured failure details and classifies retryable versus non-retryable failures with exponential backoff. |
+| CI verification | CI parses JUnit XML and fails if DynamoDB integration tests are skipped. |
 
-## Remaining Limitations (Acknowledged, Not Defects)
+## Verification
 
-- DynamoDB Local must be running for integration tests and `runPerf`.
-- Cross-run deduplication for messages that arrive in separate ingestion runs with no overlapping source IDs is not possible without additional bank reference data (documented in DECISION_LOG entry 1).
-- `DynamoDbLedgerAdapter` holds discrepancies in memory only — no durable DynamoDB schema for discrepancies (documented in class Javadoc).
-- Performance numbers in README are design expectations. Measured values require running `./gradlew runPerf` with DynamoDB Local active.
+Final verification must be read from the latest GitHub Actions run for the final commit. Local Windows verification before commit passed:
+
+- `./gradlew clean test`: 58 tests completed, 0 failed, 10 DynamoDB tests skipped locally because DynamoDB Local was not running.
+- `./gradlew -q --console=plain selfCheck`: passed with 522 messages read, 256 transactions written, 43 skipped unsupported messages, 0 malformed records, 0 failed writes, and the expected `-7500.00` discrepancy.
+
+## Remaining Limits
+
+- Local Windows verification cannot prove DynamoDB integration when DynamoDB Local is not running; CI is the required source of truth for those tests.
+- `Category` is frozen, so there is no `UNKNOWN`; uncertain transfer cases remain as their original `SPEND` or `INCOME`.

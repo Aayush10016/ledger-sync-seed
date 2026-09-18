@@ -35,7 +35,12 @@ public final class SelfCheck {
         System.out.printf("  messages read       %d%n", stats.messagesRead());
         System.out.printf("  transactions written %d%n", stats.transactionsWritten());
         System.out.printf("  messages skipped    %d%n", stats.messagesSkipped());
+        System.out.printf("  malformed records   %d%n", stats.malformedRecords());
         System.out.printf("  failed writes       %d%n", stats.failedWrites());
+        if (stats.malformedRecords() > 0) {
+            System.err.println("  FAIL: Malformed input records were present.");
+            failed = true;
+        }
 
         List<NormalizedTxn> ledger = store.all();
         Map<Category, BigDecimal> cats = in.simplifymoney.ledgersync.report.Reports
