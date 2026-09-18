@@ -395,11 +395,14 @@ public class DynamoDbLedgerStoreIntegrationTest {
                 Direction.DEBIT, new BigDecimal("75.00"),
                 Category.SPEND, "SWIGGY", List.of("lifecycle-1"));
 
-        // Phase 1: seed into SQL store
-        Path dbFile = Files.createTempDirectory("lifecycle-db").resolve("db");
-        SqlLedgerStore sqlStore = new SqlLedgerStore(dbFile);
-        sqlStore.migrate(Path.of(System.getProperty("user.dir"), "db", "migration"));
-        sqlStore.save(original);
+        // Phase 1: seed into mock SQL store
+        LedgerStore sqlStore = new LedgerStore() {
+            @Override public void save(NormalizedTxn txn) {}
+            @Override public List<NormalizedTxn> all() { return List.of(original); }
+            @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {}
+            @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
+            @Override public long count() { return 1; }
+        };
         assertEquals(1, sqlStore.all().size());
 
         // Phase 2: backfill SQL → DynamoDB
@@ -422,7 +425,5 @@ public class DynamoDbLedgerStoreIntegrationTest {
         assertEquals(List.of("lifecycle-1"), byId.sourceMessageIds());
         assertEquals(new BigDecimal("75.00"), byId.amount());
         assertEquals(Category.SPEND, byId.category());
-
-        sqlStore.close();
     }
 }
