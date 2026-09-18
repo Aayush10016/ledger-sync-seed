@@ -38,89 +38,70 @@ public final class IngestService {
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
         List<ParsedTxn> parsedTxns = new ArrayList<>();
-        int skipped = 0;
+        List<SkipDetail> skipDetails = new ArrayList<>();
         
         for (RawMessage m : messages) {
             try {
                 Optional<ParsedTxn> p = parsers.parse(m);
                 if (p.isEmpty()) {
-                    System.err.println("SKIPPED: " + m.body());
-                    skipped++;
+                    skipDetails.add(new SkipDetail(m.messageId(), "unsupported format"));
                     continue;
                 }
                 parsedTxns.add(p.get());
             } catch (Exception e) {
-                System.err.println("Failed to parse message ID " + m.messageId() + ": " + e.getMessage());
-                skipped++;
+                skipDetails.add(new SkipDetail(m.messageId(), e.getMessage()));
             }
         }
-
-        List<NormalizedTxn> existingTxns = store.all();
-        java.util.Map<String, java.util.Set<String>> existingKeysToMsgIds = new java.util.HashMap<>();
-        for (NormalizedTxn e : existingTxns) {
-            String key = in.simplifymoney.ledgersync.util.TxnIdentity.getId(e);
-            existingKeysToMsgIds.computeIfAbsent(key, k -> new java.util.HashSet<>()).addAll(e.sourceMessageIds());
+        
+        if (!skipDetails.isEmpty()) {
+            System.err.println("Skipped " + skipDetails.size() + " messages:");
+            Map<String, Integer> reasons = new java.util.HashMap<>();
+            for (SkipDetail d : skipDetails) {
+                reasons.merge(d.reason(), 1, Integer::sum);
+            }
+            reasons.forEach((r, count) -> System.err.println("- " + r + ": " + count));
         }
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns, messages);
         int written = 0;
         int failedWrites = 0;
         for (NormalizedTxn t : txns) {
-            String key = in.simplifymoney.ledgersync.util.TxnIdentity.getId(t);
-            java.util.Set<String> existingIds = existingKeysToMsgIds.get(key);
-            
             try {
-                if (existingIds == null) {
-                    store.save(t);
-                    written++;
-                } else {
-                    // If the transaction exists, check if there are NEW message IDs not yet saved
-                    java.util.List<String> newIds = new java.util.ArrayList<>();
-                    for (String msgId : t.sourceMessageIds()) {
-                        if (!existingIds.contains(msgId)) {
-                            newIds.add(msgId);
-                        }
-                    }
-                    
-                    if (!newIds.isEmpty()) {
-                        // Fully merge old and new message IDs, sort and deduplicate them
-                        java.util.List<String> combined = new java.util.ArrayList<>(existingIds);
-                        for (String newId : newIds) {
-                            if (!combined.contains(newId)) {
-                                combined.add(newId);
-                            }
-                        }
-                        java.util.Collections.sort(combined);
-
-                        // Update the existing transaction with the fully merged IDs atomically
-                        store.save(new NormalizedTxn(
-                            t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), 
-                            t.category(), t.merchant(), combined
-                        ));
-                        written++;
-                    }
-                }
+                store.save(t);
+                written++;
             } catch (Exception e) {
-                System.err.println("Failed to write transaction " + key + ": " + e.getMessage());
+                System.err.println("Failed to write transaction " + t + ": " + e.getMessage());
                 failedWrites++;
             }
         }
 
-        return new Stats(messages.size(), written, skipped, failedWrites);
+        return new Stats(messages.size(), written, skipDetails.size(), failedWrites, skipDetails);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
         List<RawMessage> out = new ArrayList<>();
         try (Stream<String> lines = Files.lines(corpus)) {
+            int lineNum = 0;
             for (String line : (Iterable<String>) lines.filter(s -> !s.isBlank())::iterator) {
-                Map<String, Object> o = Json.parseObject(line);
-                out.add(new RawMessage(
-                        (String) o.get("message_id"),
-                        (String) o.get("channel"),
-                        (String) o.get("sender"),
-                        OffsetDateTime.parse((String) o.get("received_at")),
-                        (String) o.get("device_id"),
-                        (String) o.get("body")));
+                lineNum++;
+                try {
+                    Map<String, Object> o = Json.parseObject(line);
+                    
+                    String messageId = (String) o.get("message_id");
+                    String channel = (String) o.get("channel");
+                    String receivedAtStr = (String) o.get("received_at");
+                    OffsetDateTime receivedAt = receivedAtStr == null ? null : OffsetDateTime.parse(receivedAtStr);
+                    
+                    out.add(new RawMessage(
+                            messageId,
+                            channel,
+                            (String) o.get("sender"),
+                            receivedAt,
+                            (String) o.get("device_id"),
+                            (String) o.get("body")));
+                } catch (Exception e) {
+                    System.err.println("Failed to load record at line " + lineNum + ": " + e.getMessage());
+                }
             }
         }
         return out;
@@ -200,13 +181,14 @@ public final class IngestService {
                 ids.add(item.sourceMessageId());
             }
             Category c = determineCategory(first);
+            String bestMerchant = chooseBestMerchant(group, rawMap);
             out.add(new NormalizedTxn(
                     first.accountLast4(),
                     first.occurredAt(),
                     first.direction(),
                     first.amount(),
                     c,
-                    first.merchant(),
+                    bestMerchant,
                     ids
             ));
         }
@@ -214,7 +196,7 @@ public final class IngestService {
         List<in.simplifymoney.ledgersync.model.Discrepancy> existingDisc = store.discrepancies();
         java.util.Set<String> existingDiscKeys = new java.util.HashSet<>();
         for (in.simplifymoney.ledgersync.model.Discrepancy d : existingDisc) {
-            existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount());
+            existingDiscKeys.add(d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount() + "|" + d.note());
         }
 
         Map<String, List<NormalizedTxn>> byAcct = new java.util.LinkedHashMap<>();
@@ -222,9 +204,11 @@ public final class IngestService {
             byAcct.computeIfAbsent(t.accountLast4(), k -> new ArrayList<>()).add(t);
         }
         
+        java.util.Set<String> accountsWithoutReliableBalances = java.util.Set.of("3310");
+
         for (Map.Entry<String, List<NormalizedTxn>> entry : byAcct.entrySet()) {
             String acct = entry.getKey();
-            if ("3310".equals(acct)) continue;
+            if (accountsWithoutReliableBalances.contains(acct)) continue;
             List<NormalizedTxn> txns = entry.getValue();
             txns.sort(java.util.Comparator.comparing(NormalizedTxn::occurredAt));
 
@@ -254,7 +238,7 @@ public final class IngestService {
                                     acct, t.occurredAt(), diff,
                                     "ledger computed " + expected.toPlainString() + " but bank reported " + statedBal.toPlainString()
                             );
-                            String dKey = d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount();
+                            String dKey = d.accountLast4() + "|" + d.occurredAt().toEpochSecond() + "|" + d.amount() + "|" + d.note();
                             if (!existingDiscKeys.contains(dKey)) {
                                 store.save(d);
                                 existingDiscKeys.add(dKey);
@@ -288,7 +272,7 @@ public final class IngestService {
                     t1.direction() != t2.direction()) {
                     
                     long diff = Math.abs(t1.occurredAt().toEpochSecond() - t2.occurredAt().toEpochSecond());
-                    if (diff <= 300) {
+                    if (diff <= 60) {
                         out.set(i, withCategory(t1, Category.TRANSFER));
                         out.set(j, withCategory(t2, Category.TRANSFER));
                         break;
@@ -296,6 +280,28 @@ public final class IngestService {
                 }
             }
         }
+    }
+
+    private String chooseBestMerchant(List<ParsedTxn> group, Map<String, RawMessage> rawMap) {
+        String best = null;
+        boolean hasEmail = false;
+        for (ParsedTxn p : group) {
+            RawMessage raw = rawMap.get(p.sourceMessageId());
+            if (p.merchant() != null) {
+                if (best == null) {
+                    best = p.merchant();
+                    hasEmail = (raw != null && "email".equals(raw.channel()));
+                } else if (raw != null && "email".equals(raw.channel()) && !hasEmail) {
+                    // Prefer email merchants, they are usually more descriptive than SMS
+                    best = p.merchant();
+                    hasEmail = true;
+                } else if (p.merchant().length() > best.length() && (raw == null || "email".equals(raw.channel()) == hasEmail)) {
+                    // Prefer longer descriptive string if same channel
+                    best = p.merchant();
+                }
+            }
+        }
+        return best;
     }
 
     private Category determineCategory(ParsedTxn p) {
@@ -337,5 +343,7 @@ public final class IngestService {
                 t.amount(), c, t.merchant(), t.sourceMessageIds());
     }
 
-    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped, int failedWrites) {}
+    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped, int failedWrites, List<SkipDetail> skipDetails) {}
+    
+    public record SkipDetail(String messageId, String reason) {}
 }

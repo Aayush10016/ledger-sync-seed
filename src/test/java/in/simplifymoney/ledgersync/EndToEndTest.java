@@ -47,7 +47,8 @@ public class EndToEndTest {
             // handle environments without Docker, while still running natively on CI.
             DynamoDbLedgerStore dynamo = null;
             boolean dynamoReady = false;
-            try {
+            try (java.net.Socket s = new java.net.Socket("localhost", 8000)) {
+                // If socket connects, DynamoDB is up
                 resetDynamoTable(client);
                 dynamo = new DynamoDbLedgerStore(client);
                 client.waiter().waitUntilTableExists(b -> b.tableName("LedgerStore"));

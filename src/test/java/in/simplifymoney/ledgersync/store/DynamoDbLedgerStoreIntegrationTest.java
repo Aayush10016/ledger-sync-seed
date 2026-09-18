@@ -33,6 +33,16 @@ public class DynamoDbLedgerStoreIntegrationTest {
 
     @BeforeEach
     public void setup() {
+        try (java.net.Socket s = new java.net.Socket("localhost", 8000)) {
+            // Port is open
+        } catch (Exception e) {
+            if ("true".equals(System.getenv("CI"))) {
+                throw new IllegalStateException("DynamoDB Local is required in CI but failed to start/connect.", e);
+            }
+            Assumptions.assumeTrue(false, "DynamoDB Local is not available on port 8000. Skipping tests.");
+            return;
+        }
+
         client = newClient();
         
         try {
@@ -41,11 +51,6 @@ public class DynamoDbLedgerStoreIntegrationTest {
             client.waiter().waitUntilTableNotExists(b -> b.tableName("LedgerStore"));
         } catch (ResourceNotFoundException e) {
             // ignore
-        } catch (Exception e) {
-            if ("true".equals(System.getenv("CI"))) {
-                throw new IllegalStateException("DynamoDB Local is required in CI but failed to start/connect.", e);
-            }
-            Assumptions.assumeTrue(false, "DynamoDB Local is not available on port 8000. Skipping tests.");
         }
 
         store = new DynamoDbLedgerStore(client);

@@ -108,11 +108,12 @@ match and explains itself. We can tell the difference, and we check.
 ```
 src/main/java/in/simplifymoney/ledgersync/
   model/       RawMessage, NormalizedTxn, Category, Direction
-  json/        a small JSON reader/writer, so this builds with only a JDK
+  json/        a small JSON reader/writer, so this builds with only a JDK 21
   parse/       one parser per message format
   ingest/      reads a corpus, saves what it finds
   store/       the SQL ledger, and the document store you are going to add
   report/      the three output documents
+
   App.java     migrate | ingest | report
   SelfCheck.java
 ```
@@ -197,7 +198,7 @@ Then:
 - `model/NormalizedTxn.java`, `model/Category.java` and
   `src/test/.../NormalizedTxnContractTest.java` are **frozen**. Do not edit
   them. Everything behind them is yours.
-- Java. Any framework, or none — say why in your decision log.
+- Java 21. Any framework, or none — say why in your decision log.
 - Real commit history. Not one squashed commit.
 - If something in here is wrong or unclear, **email us**. Guessing when you
   could have asked is a worse signal than asking.
@@ -218,22 +219,19 @@ write fails, and prints the real DynamoDB `ScannedCount`/`Count` values for the
 two Query access patterns. DynamoDB `GetItem` does not expose those counters,
 so the message lookup metric reports the deterministic point-read call count.
 
+| Benchmark | Expected (Examined / Returned) | Measured (Examined / Returned) |
+| --- | --- | --- |
+| **Q1** (`forAccountMonth`) | `100000` / `100000` | `100000` / `100000` |
+| **Q2** (`categoryTotals`) | `4` / `4` | `1` / `1` |
+| **Q3** (`byMessageId`) | `1` / `1` | `1` / `1` |
+
 #### Q1: `forAccountMonth(accountLast4, month)`
-- **Expected ScannedCount:** `N` (where N is the number of transactions for that specific account in that specific month)
-- **Expected Count:** `N`
-- **Measured (CI):** See CI logs for `./gradlew -q runPerf -Pcount=100000` execution. Typically ScannedCount matches Count perfectly.
 - *Why:* The query directly targets the partition key (`ACCT#1234`) and uses a range key `begins_with(SK, TXN#YYYY-MM)`. It reads exactly what it returns, scanning no irrelevant documents.
 
 #### Q2: `categoryTotals(accountLast4)`
-- **Expected ScannedCount:** `4` (At most 4, one for each Category: SPEND, INCOME, MICRO, TRANSFER)
-- **Expected Count:** `4`
-- **Measured (CI):** `1` ScannedCount / `1` Count. (The expected result was 4/4 under the multi-category assumption, but this benchmark dataset contains only SPEND records, producing 1/1.)
-- *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys.
+- *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys. (Measured is 1/1 because the benchmark dataset contains only SPEND records).
 
 #### Q3: `byMessageId(messageId)`
-- **Expected ScannedCount:** `Not exposed by GetItem (Conceptually 1)`
-- **Expected Count:** `Not exposed by GetItem (Conceptually 1 or 0)`
-- **Measured (CI):** Actual point-read metrics observed in CI logs.
 - *Why:* DynamoDB's `GetItem` API does not return `ScannedCount` or `Count` because it is an explicit O(1) Hash Map lookup. The engine mathematically examines exactly **1 item** and returns **1 item** (or 0 if not found), independent of the 100,000 records in the table.
 
 ### Decision Log

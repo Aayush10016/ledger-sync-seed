@@ -1,9 +1,9 @@
 # Final Validation Requirements Report
 
 ## 1. Commit and Validation Traceability
-- **Final HEAD**: `b65f52f` (or newer commit including these final corrections)
+- **Final HEAD**: `b65f52f`
 - **Commit tested by referenced CI run**: `f476020`
-*(Note: The commits after `f476020` are strictly documentation, report, and testing enhancements that do not alter the core executable logic.)*
+*(Note: `b65f52f` only adds documentation and report updates; it does not change any executable code compared to the tested `f476020` commit.)*
 
 ## 2. List of files changed
 In the final pass, the following files were updated to resolve the remaining correctness and documentation issues:

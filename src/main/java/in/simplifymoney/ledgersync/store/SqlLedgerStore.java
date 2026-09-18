@@ -30,7 +30,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
     private final String dbUrl;
 
     public SqlLedgerStore(Path dbFile) {
-        this.dbUrl = URL_PREFIX + dbFile.toAbsolutePath();
+        this.dbUrl = URL_PREFIX + dbFile.toAbsolutePath() + ";DB_CLOSE_DELAY=-1";
         // Test connection
         try (Connection conn = DriverManager.getConnection(this.dbUrl, "sa", "")) {
             if (conn == null) throw new SQLException("Null connection");

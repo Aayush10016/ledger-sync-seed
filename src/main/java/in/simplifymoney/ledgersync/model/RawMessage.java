@@ -16,4 +16,19 @@ public record RawMessage(
         OffsetDateTime receivedAt,
         String deviceId,
         String body) {
+        
+    public RawMessage {
+        if (messageId == null || messageId.isBlank()) {
+            throw new IllegalArgumentException("messageId must be present and non-empty");
+        }
+        if (channel == null || (!channel.equals("sms") && !channel.equals("email"))) {
+            throw new IllegalArgumentException("channel must be 'sms' or 'email'");
+        }
+        if (receivedAt == null) {
+            throw new IllegalArgumentException("receivedAt must be a valid timestamp");
+        }
+        if (body == null || body.isBlank()) {
+            throw new IllegalArgumentException("body must be present");
+        }
+    }
 }

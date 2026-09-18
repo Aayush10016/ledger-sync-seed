@@ -19,3 +19,8 @@ Concrete AI mistake and correction:
 
 Another correction:
 - A previous checker compared transaction snapshots but did not validate category-total materialization or message-ID index ownership. The final checker compares both stores' transaction snapshots and also verifies category totals plus `byMessageId` ownership for every source ID.
+
+Limitations of AI Assistance in this context:
+- AI assistants lack domain-specific intuition about unstated business rules (e.g., whether to synthesize phantom ledger transactions to "make numbers match" or simply report the gap).
+- The AI required explicit manual direction to implement the Epoch Second timezone-normalization fix, as it initially could not discern that cross-channel deduplication was failing due to UTC offset mismatches (e.g. `+05:30` vs `Z`) in otherwise identical alerts.
+- Automated code generation relies on continuous human oversight to prevent infinite loops (like unclosed DynamoDB paginators) and to enforce exact interface constraints without rewriting frozen boilerplate.
