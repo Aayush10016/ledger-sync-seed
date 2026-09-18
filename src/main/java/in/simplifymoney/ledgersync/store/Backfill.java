@@ -23,6 +23,10 @@ public final class Backfill {
     }
 
     public Result run() {
+        return run(30, TimeUnit.MINUTES);
+    }
+
+    public Result run(long timeout, TimeUnit unit) {
         System.out.println("Starting High-Performance Backfill...");
         AtomicLong read = new AtomicLong(0);
         AtomicLong written = new AtomicLong(0);
@@ -99,7 +103,7 @@ public final class Backfill {
             }
 
             executor.shutdown();
-            if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
+            if (!executor.awaitTermination(timeout, unit)) {
                 System.err.println("Backfill executor timed out. Cancelling unfinished tasks...");
                 executor.shutdownNow();
                 timedOut = true;

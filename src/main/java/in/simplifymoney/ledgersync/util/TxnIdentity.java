@@ -15,6 +15,14 @@ public final class TxnIdentity {
      * lexicographically lowest message ID among its sources, combined with its visible fields.
      * This provides a stable, repeatable deterministic identity, while explicitly preventing 
      * two independent identical transactions (e.g. two $5 coffees at the same minute) from merging.
+     *
+     * KNOWN DOMAIN LIMITATION (Identity Drift):
+     * Because NormalizedTxn is a frozen domain contract, we cannot assign a persistent `txn_id` 
+     * field at creation time. If a transaction later receives an out-of-order delayed source 
+     * message whose ID sorts lexicographically earlier than all existing IDs, the transaction's
+     * canonical identity WILL DRIFT. This will result in an orphaned legacy record in document 
+     * stores that don't support atomic renames. This edge-case is an accepted limitation of purely 
+     * stateless identity derivation.
      */
     public static String getId(NormalizedTxn txn) {
         String m = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();

@@ -57,23 +57,28 @@ public class SqlLedgerStoreTest {
                 Category.SPEND, "AMAZON", List.of("msg-1")
         );
 
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
         for (int i = 0; i < threadCount; i++) {
-            executor.submit(() -> {
+            futures.add(executor.submit(() -> {
                 try {
                     latch.await();
                     store.save(t);
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    throw new RuntimeException(e);
                 } finally {
                     done.countDown();
                 }
-            });
+            }));
         }
 
         // Release all threads simultaneously
         latch.countDown();
         done.await(10, TimeUnit.SECONDS);
         executor.shutdown();
+        
+        for (java.util.concurrent.Future<?> f : futures) {
+            f.get(); // Re-throw any exceptions from the worker threads
+        }
 
         // Only one record should exist (idempotent atomic merge)
         assertEquals(initialCount + 1, store.count());

@@ -157,7 +157,11 @@ public final class ConsistencyChecker {
         System.out.println("==========================================");
         System.out.println("Consistency Check Summary:");
         System.out.println("- Checks performed: forAccountMonth, categoryTotals, byMessageId, documentOnlyGhosts");
-        System.out.println("- Completeness Status: COMPLETE. All SQL and Document transactions have been fully reconciled.");
+        if (out.isEmpty()) {
+            System.out.println("- Completeness Status: COMPLETE. All SQL and Document transactions have been fully reconciled.");
+        } else {
+            System.out.println("- Completeness Status: FAILED. Found " + out.size() + " divergences.");
+        }
         System.out.println("- SQL records inspected: " + cleanSqlTxns.size());
         System.out.println("- Document records scanned: " + allDocTxns.size());
         System.out.println("- Divergences found: " + out.size());

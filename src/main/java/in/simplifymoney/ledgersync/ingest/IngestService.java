@@ -272,11 +272,25 @@ public final class IngestService {
                             // Use a deterministic ID derived from stable fields so that re-running
                             // the pipeline against the same corpus produces the exact same reconciliation
                             // record and does NOT create duplicates on a second pass.
-                            String reconId = "recon-" + sha256Hex(
+                            String baseReconId = "recon-" + sha256Hex(
                                 acct + "|" + synTime.toEpochSecond() + "|" + synAmt.toPlainString());
+                            
+                            String reconId = baseReconId;
+                            int seq = 1;
+                            while (true) {
+                                boolean used = false;
+                                for (NormalizedTxn existingSyn : synthesizedTxns) {
+                                    if (existingSyn.sourceMessageIds().contains(reconId)) {
+                                        used = true;
+                                        break;
+                                    }
+                                }
+                                if (!used) break;
+                                reconId = baseReconId + "-" + seq++;
+                            }
 
                             synthesizedTxns.add(new NormalizedTxn(
-                                acct, synTime, synDir, synAmt, synCat, "MISSING_DATA", List.of(reconId)
+                                acct, synTime, synDir, synAmt, synCat, "RECONCILIATION_ADJUSTMENT", List.of(reconId)
                             ));
                         }
                     }

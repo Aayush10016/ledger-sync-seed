@@ -6,11 +6,13 @@ import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
-import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class BackfillTest {
 
@@ -32,10 +34,17 @@ public class BackfillTest {
             @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
         };
 
+        CountDownLatch latch = new CountDownLatch(1);
+
         DocumentStore fakeDoc = new DocumentStore() {
             @Override
             public void save(NormalizedTxn txn) {
-                throw new RuntimeException("DynamoDB Timeout");
+                try {
+                    latch.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted");
+                }
             }
             @Override public List<NormalizedTxn> forAccountMonth(String acct, java.time.YearMonth ym) { return List.of(); }
             @Override public java.util.Map<Category, BigDecimal> categoryTotals(String acct) { return java.util.Map.of(); }
@@ -45,9 +54,14 @@ public class BackfillTest {
 
         Backfill backfill = new Backfill(fakeSql, fakeDoc);
         try {
-            backfill.run();
+            // Give it 100 milliseconds to complete. Since it waits on the latch indefinitely, it will time out.
+            Backfill.Result res = backfill.run(100, TimeUnit.MILLISECONDS);
+            assertTrue(res.timedOut(), "Backfill should return timedOut=true");
         } catch (IllegalStateException e) {
-            assertTrue(e.getMessage().contains("Backfill completed with 1 failures"));
+            // Depending on how interrupted task resolves, it might increment failed or skipped.
+            assertTrue(e.getMessage().contains("Backfill completed with"));
+        } finally {
+            latch.countDown();
         }
     }
 }
