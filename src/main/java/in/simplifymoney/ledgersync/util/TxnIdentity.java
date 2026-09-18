@@ -15,17 +15,13 @@ public final class TxnIdentity {
      * been persisted before.
      */
     public static String getId(NormalizedTxn txn) {
-        String base = "sources|";
-        if (txn.sourceMessageIds() != null && !txn.sourceMessageIds().isEmpty()) {
-            java.util.List<String> sorted = new java.util.ArrayList<>(txn.sourceMessageIds());
-            java.util.Collections.sort(sorted);
-            base += String.join(",", sorted);
-        } else {
-            base += txn.accountLast4() + "|"
-                    + txn.occurredAt().toEpochSecond() + "|"
-                    + txn.direction().name() + "|"
-                    + txn.amount().toPlainString();
+        if (txn.sourceMessageIds() == null || txn.sourceMessageIds().isEmpty()) {
+            throw new IllegalArgumentException("Transactions must have at least one source message ID to guarantee uniqueness.");
         }
+        String base = "sources|";
+        java.util.List<String> sorted = new java.util.ArrayList<>(txn.sourceMessageIds());
+        java.util.Collections.sort(sorted);
+        base += String.join(",", sorted);
 
         return "txn-" + sha256Hex(base);
     }

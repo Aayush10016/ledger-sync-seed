@@ -10,4 +10,14 @@ javac -d build/selfcheck $(find src/main/java -name '*.java' ! -name 'DynamoDbLe
 
 echo
 echo "==> running"
+set +e
 java -cp build/selfcheck in.simplifymoney.ledgersync.SelfCheck "$@"
+EXIT_CODE=$?
+set -e
+if [ $EXIT_CODE -ne 0 ]; then
+  echo "Verification failed due to discrepancies."
+  exit 1
+fi
+
+echo "Verification passed."
+exit 0

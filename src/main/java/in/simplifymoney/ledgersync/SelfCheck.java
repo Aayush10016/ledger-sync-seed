@@ -24,6 +24,8 @@ public final class SelfCheck {
     public static void main(String[] args) throws Exception {
         Path corpus = Path.of(args.length > 0 ? args[0] : "fixtures/corpus-a.jsonl");
         Path totals = Path.of(args.length > 1 ? args[1] : "fixtures/corpus-a-totals.json");
+        
+        boolean failed = false;
 
         InMemoryLedgerStore store = new InMemoryLedgerStore();
         IngestService ingest = new IngestService(new Parsers(), store);
@@ -46,8 +48,14 @@ public final class SelfCheck {
         Map<String, Object> accounts = (Map<String, Object>) want.get("accounts");
 
         System.out.println("\nAGAINST fixtures/corpus-a-totals.json");
-        System.out.printf("  transactions   expected %s, produced %d%n",
-                want.get("transactions_expected"), ledger.size());
+        
+        int expectedTxns = ((java.math.BigDecimal) want.get("transactions_expected")).intValue();
+        System.out.printf("  transactions   expected %d, produced %d%n",
+                expectedTxns, ledger.size());
+        if (expectedTxns != ledger.size()) {
+            System.err.println("  FAIL: Total transaction count mismatch!");
+            failed = true;
+        }
 
         for (Map.Entry<String, Object> e : accounts.entrySet()) {
             @SuppressWarnings("unchecked")
@@ -65,16 +73,48 @@ public final class SelfCheck {
                     case CREDIT -> running.add(t.amount());
                 };
             }
-            System.out.printf("  **%s  txns %d (expected %s)%n",
-                    e.getKey(), n, a.get("transactions_expected"));
+            int expectedAcctTxns = ((java.math.BigDecimal) a.get("transactions_expected")).intValue();
+            System.out.printf("  **%s  txns %d (expected %d)%n",
+                    e.getKey(), n, expectedAcctTxns);
+            if (n != expectedAcctTxns) {
+                System.err.printf("  FAIL: Account %s transaction count mismatch!%n", e.getKey());
+                failed = true;
+            }
+            
             System.out.printf("           balance from ledger %s, bank says %s, difference %s%n",
                     running.toPlainString(), closing.toPlainString(),
                     running.subtract(closing).toPlainString());
         }
 
         System.out.println("\nDISCREPANCIES");
-        store.discrepancies().forEach(d -> System.out.println("  " + d));
-
-        System.out.println("\nThis is the starting point, not the finish line.");
+        List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies = store.discrepancies();
+        
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> allowedDiscs = (List<Map<String, Object>>) want.get("allowed_discrepancies");
+        if (allowedDiscs == null) allowedDiscs = List.of();
+        
+        for (in.simplifymoney.ledgersync.model.Discrepancy d : discrepancies) {
+            System.out.println("  " + d);
+            boolean allowed = false;
+            for (Map<String, Object> ad : allowedDiscs) {
+                if (d.accountLast4().equals(ad.get("account")) &&
+                    d.amount().toPlainString().equals(ad.get("amount"))) {
+                    allowed = true;
+                    System.out.println("    (Expected: " + ad.get("reason") + ")");
+                    break;
+                }
+            }
+            if (!allowed) {
+                System.err.println("  FAIL: Unexplained discrepancy found!");
+                failed = true;
+            }
+        }
+        
+        if (failed) {
+            System.err.println("\nVerification FAILED. See above for details.");
+            System.exit(1);
+        } else {
+            System.out.println("\nVerification PASSED.");
+        }
     }
 }

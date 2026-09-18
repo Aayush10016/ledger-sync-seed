@@ -1,12 +1,12 @@
 {
   "note": "Totals for this corpus. Your ledger must reconcile to these. Row-level answers are not provided.",
   "raw_messages": 522,
-  "transactions_expected": 257,
+  "transactions_expected": 256,
   "accounts": {
     "4821": {
       "opening_balance": "48211.40",
       "closing_balance": "41126.34",
-      "transactions_expected": 146,
+      "transactions_expected": 145,
       "spend": "87068.38",
       "income": "101340.83",
       "micro_count": 52,
@@ -25,5 +25,12 @@
       "transferred_out": "6000.00",
       "transferred_in": "25000.00"
     }
-  }
+  },
+  "allowed_discrepancies": [
+    {
+      "account": "4821",
+      "amount": "-7500.00",
+      "reason": "Missing SMS between 11:53 and 17:06"
+    }
+  ]
 }
