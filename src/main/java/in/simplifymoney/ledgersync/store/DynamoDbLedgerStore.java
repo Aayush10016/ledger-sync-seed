@@ -417,9 +417,25 @@ public class DynamoDbLedgerStore implements DocumentStore {
             try {
                 client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
             } catch (TransactionCanceledException e) {
+                if (allSourceIdsOwnedByCompatibleTransaction(txn)) {
+                    return;
+                }
                 throw new IllegalStateException("Failed to update transaction with new message IDs due to concurrent modification", e);
             }
         }
+    }
+
+    private boolean allSourceIdsOwnedByCompatibleTransaction(NormalizedTxn txn) {
+        for (String msgId : txn.sourceMessageIds()) {
+            Optional<NormalizedTxn> existingTarget = byMessageId(msgId);
+            if (existingTarget.isEmpty()) {
+                return false;
+            }
+            if (!isCompatible(existingTarget.get(), txn)) {
+                throw new IllegalStateException("Conflict: Message ID " + msgId + " belongs to a different transaction!");
+            }
+        }
+        return true;
     }
 
     private NormalizedTxn deserialize(Map<String, AttributeValue> item) {
