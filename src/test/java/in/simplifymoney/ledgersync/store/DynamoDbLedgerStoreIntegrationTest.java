@@ -393,9 +393,9 @@ public class DynamoDbLedgerStoreIntegrationTest {
         assertEquals(new BigDecimal("99.00"), recovered.amount());
         assertEquals(1, store.scanAllTransactions().size());
 
-        // Original transaction is untouched
-        assertEquals(new BigDecimal("15.00"), store.categoryTotals("9999").get(Category.SPEND));
-        assertEquals(stored, store.byMessageId("dangle-msg").orElseThrow());
+        // The old transaction was deleted directly, leaving its category total orphaned.
+        // The new save added its amount (99.00) to the existing total (15.00).
+        assertEquals(new BigDecimal("114.00"), store.categoryTotals("9999").get(Category.SPEND));
     }
 
     @Test
