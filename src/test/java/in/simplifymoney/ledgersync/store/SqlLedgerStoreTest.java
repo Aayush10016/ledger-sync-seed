@@ -181,4 +181,39 @@ public class SqlLedgerStoreTest {
                 .count();
         assertEquals(threadCount, concurrentRows);
     }
+    @Test
+    public void conflictingCategoryForOwnedSourceIsRejected() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-06T10:00:00+05:30");
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.SPEND, "CATMERCH", List.of("msg-cat")));
+
+        // Same source message ID but different category — must be rejected
+        assertThrows(IllegalStateException.class, () -> store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.MICRO, "CATMERCH", List.of("msg-cat"))));
+
+        // The original record must be unchanged
+        List<NormalizedTxn> rows = store.all().stream()
+                .filter(t -> t.merchant().equals("CATMERCH")).toList();
+        assertEquals(1, rows.size());
+        assertEquals(Category.SPEND, rows.get(0).category());
+    }
+
+    @Test
+    public void conflictingMerchantForOwnedSourceIsRejected() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-07T10:00:00+05:30");
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.SPEND, "ORIGINAL_MERCH", List.of("msg-merch")));
+
+        // Same source message ID but different merchant — must be rejected
+        assertThrows(IllegalStateException.class, () -> store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.SPEND, "CHANGED_MERCH", List.of("msg-merch"))));
+
+        List<NormalizedTxn> rows = store.all().stream()
+                .filter(t -> t.merchant() != null && t.merchant().equals("ORIGINAL_MERCH")).toList();
+        assertEquals(1, rows.size());
+    }
 }

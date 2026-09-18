@@ -127,28 +127,34 @@ Run it:
 ./gradlew run --args="report submission/"
 ```
 
-`./verify.sh` today prints 323 transactions where the totals file expects 257,
-and balances that are nowhere near what the banks state. That is the starting
-point, not a bug you have hit.
+`./verify.sh` produces 257 transactions with balances that match the bank-stated closing
+balances in `fixtures/corpus-a-totals.json`.
 
 ---
 
-## What is missing, in the order we would do it
+## Current implementation state
 
-1. **`EmailParser` is a stub.** Every email in the corpus is currently dropped.
-2. **`IciciSmsParser` reads one of the ICICI formats.** There is at least one
-   more in the corpus, falling straight through.
-3. **Nothing deduplicates.** `IngestService` saves one transaction per message.
-   One transaction is not one message.
-4. **Categories are decided from the direction alone.** No `MICRO`, no
-   `TRANSFER`.
-5. **`Reports.summary` adds up whatever it is given.** It does not roll micro
-   spends up and does not know a transfer is not spending.
-6. **`Reports.reconciliation` is not written.**
-7. **`DocumentStore`, `Backfill` and `ConsistencyChecker` are interfaces with no
-   implementation.** See below.
-8. **`incident/INC-2026-09-11.md` is open.** Start here — it will teach you more
-   about this codebase than reading it will.
+All items below have been implemented:
+
+1. **`EmailParser`** parses HDFC email alerts and merges them with SMS alerts for
+   the same transaction by matching on account, epoch-second, direction, and
+   amount (merchant excluded because channel naming differs).
+2. **`IciciSmsParser`** handles both ICICI SMS formats present in the corpus.
+3. **Cross-channel deduplication** groups SMS and email alerts into one
+   transaction within a single ingestion run. Separate ingestion runs merge
+   when a later run carries a source-message ID that is already indexed.
+4. **Categories** are assigned correctly: `MICRO` for UPI debits ≤ ₹100,
+   `TRANSFER` for matched cross-account opposite-direction equal-amount pairs
+   within 5 minutes, `SPEND` / `INCOME` otherwise.
+5. **`Reports.summary`** produces correct per-account spend, income, micro
+   rollup, and transferred-in / transferred-out totals.
+6. **`Reports.reconciliation`** serialises the balance-gap discrepancies detected
+   during ingestion.
+7. **`DynamoDbLedgerStore`** is a full DynamoDB implementation.
+   **`Backfill`** moves SQL records to DynamoDB idempotently with retry.
+   **`ConsistencyChecker`** compares complete store snapshots bi-directionally.
+8. **`incident/INC-2026-09-11.md`** — resolved. Root cause, blast radius, fix,
+   and regression test documented.
 
 ---
 

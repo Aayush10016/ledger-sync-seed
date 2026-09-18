@@ -225,7 +225,9 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
         if (!existing.accountLast4().equals(incoming.accountLast4())
                 || existing.occurredAt().toEpochSecond() != incoming.occurredAt().toEpochSecond()
                 || existing.direction() != incoming.direction()
-                || existing.amount().compareTo(incoming.amount()) != 0) {
+                || existing.amount().compareTo(incoming.amount()) != 0
+                || existing.category() != incoming.category()
+                || !java.util.Objects.equals(existing.merchant(), incoming.merchant())) {
             throw new SQLException("source message already belongs to an incompatible transaction");
         }
     }

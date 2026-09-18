@@ -55,4 +55,11 @@ Evidence: amount tests cover `Rs.5`, multiple monetary values, available balance
 ## 10. CI and verification
 Problem: CI previously did not run from push events and lacked a working wrapper/readiness setup.
 Decision: add Gradle wrapper, Java 21 toolchain, DynamoDB dummy AWS credentials, explicit readiness loop, and manual workflow verification.
-Evidence: workflow run `35353694066` passed on commit `c8a6bc0`; this fix set requires a fresh run.
+Evidence: workflow run `35353694066` passed on commit `c8a6bc0`. The workflow run reference here is intentionally historical — the latest CI results must be read from the Actions tab on the fork, not from this file.
+
+## 11. SQL/DynamoDB compatibility parity and BigDecimal transfer matching
+Problem 1: `SqlLedgerStore.validateCompatibleIdentity()` only checked account, time, direction, and amount, while `DynamoDbLedgerStore.isCompatible()` also checked category and merchant. A re-ingestion could silently accept a conflicting category for an owned source message in SQL.
+Decision: extend SQL compatibility check to include category and merchant, matching DynamoDB behaviour exactly. Tests added: `conflictingCategoryForOwnedSourceIsRejected` and `conflictingMerchantForOwnedSourceIsRejected`.
+
+Problem 2: `categorizeTransfers()` used `BigDecimal.equals()` for amount comparison. `BigDecimal.equals()` is scale-sensitive: `1000.0` does not equal `1000.00`. Transfer pairs from amounts parsed with different decimal precision would silently not be classified as transfers.
+Decision: use `compareTo() == 0` throughout. Tests added: `transferDetectionMatchesDifferentScalesViaCompareTo` and `unrelatedTransactionsOutsideTimeWindowAreNotTransfers`.

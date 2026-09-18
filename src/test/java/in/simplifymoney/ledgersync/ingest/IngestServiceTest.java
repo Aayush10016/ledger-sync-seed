@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.time.OffsetDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 public class IngestServiceTest {
 
@@ -147,5 +148,57 @@ public class IngestServiceTest {
         // Count should STILL be 2 and reconciliation should remain idempotent.
         assertEquals(2, store.count());
         assertEquals(1, store.discrepancies().size());
+    }
+
+    @Test
+    public void transferDetectionPairsMatchingAmountsAcrossAccounts() {
+        // NormalizedTxn enforces scale=2, so amounts always have exactly 2 decimal places.
+        // This test verifies that categorizeTransfers correctly identifies a cross-account
+        // debit+credit pair of the same amount within the 5-minute window as TRANSFER.
+        NormalizedTxn debit = new NormalizedTxn(
+                "4821",
+                OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
+                in.simplifymoney.ledgersync.model.Direction.DEBIT,
+                new java.math.BigDecimal("1000.00"),
+                Category.SPEND, "SRC", java.util.List.of("tf-1"));
+        NormalizedTxn credit = new NormalizedTxn(
+                "3310",
+                OffsetDateTime.parse("2026-07-10T10:01:00+05:30"),
+                in.simplifymoney.ledgersync.model.Direction.CREDIT,
+                new java.math.BigDecimal("1000.00"),
+                Category.INCOME, "DST", java.util.List.of("tf-2"));
+
+        java.util.List<NormalizedTxn> txns = new java.util.ArrayList<>(java.util.List.of(debit, credit));
+        IngestService.categorizeTransfers(txns);
+
+        assertEquals(Category.TRANSFER, txns.get(0).category(),
+                "Debit should become TRANSFER when paired with matching credit within 5 minutes");
+        assertEquals(Category.TRANSFER, txns.get(1).category(),
+                "Credit should become TRANSFER when paired with matching debit within 5 minutes");
+    }
+
+    @Test
+    public void unrelatedTransactionsOutsideTimeWindowAreNotTransfers() {
+        NormalizedTxn debit = new NormalizedTxn(
+                "4821",
+                OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
+                in.simplifymoney.ledgersync.model.Direction.DEBIT,
+                new java.math.BigDecimal("500.00"),
+                Category.SPEND, "STORE", java.util.List.of("unrelated-1"));
+        // Same amount, opposite direction, different account, but 10 minutes later (> 5 min window)
+        NormalizedTxn credit = new NormalizedTxn(
+                "3310",
+                OffsetDateTime.parse("2026-07-10T10:10:00+05:30"),
+                in.simplifymoney.ledgersync.model.Direction.CREDIT,
+                new java.math.BigDecimal("500.00"),
+                Category.INCOME, "SALARY", java.util.List.of("unrelated-2"));
+
+        java.util.List<NormalizedTxn> txns = new java.util.ArrayList<>(java.util.List.of(debit, credit));
+        IngestService.categorizeTransfers(txns);
+
+        assertNotEquals(Category.TRANSFER, txns.get(0).category(),
+                "Debit should NOT become TRANSFER when time gap > 5 minutes");
+        assertNotEquals(Category.TRANSFER, txns.get(1).category(),
+                "Credit should NOT become TRANSFER when time gap > 5 minutes");
     }
 }

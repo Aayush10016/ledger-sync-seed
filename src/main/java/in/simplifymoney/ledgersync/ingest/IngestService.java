@@ -284,7 +284,7 @@ public final class IngestService {
                 if (t2.category() == Category.TRANSFER) continue;
 
                 if (!t1.accountLast4().equals(t2.accountLast4()) &&
-                    t1.amount().equals(t2.amount()) &&
+                    t1.amount().compareTo(t2.amount()) == 0 &&
                     t1.direction() != t2.direction()) {
                     
                     long diff = Math.abs(t1.occurredAt().toEpochSecond() - t2.occurredAt().toEpochSecond());

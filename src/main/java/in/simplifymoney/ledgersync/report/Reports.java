@@ -12,12 +12,14 @@ import java.util.Map;
 import java.util.TreeSet;
 
 /**
- * The two reports the assignment asks for.
+ * The three reports the assignment asks for.
  *
- * summary() below is a first cut: it adds up what is in the ledger. It does not
- * know that a transfer is not spending, and it does not roll micro spends up.
+ * summary() computes per-account totals correctly: SPEND and INCOME exclude
+ * TRANSFER amounts; MICRO is rolled up separately. All four categories are
+ * supported.
  *
- * reconciliation() has not been written at all.
+ * reconciliation() serialises the Discrepancy records that IngestService
+ * detected from balance gaps in the incoming messages.
  */
 public final class Reports {
 
