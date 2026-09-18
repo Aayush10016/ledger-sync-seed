@@ -19,6 +19,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SqlLedgerStoreTest {
 
@@ -53,7 +55,7 @@ public class SqlLedgerStoreTest {
         long initialCount = store.count();
 
         NormalizedTxn t = new NormalizedTxn(
-                "1234", OffsetDateTime.now(), Direction.DEBIT, new BigDecimal("100.00"),
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"), Direction.DEBIT, new BigDecimal("100.00"),
                 Category.SPEND, "AMAZON", List.of("msg-1")
         );
 
@@ -82,5 +84,101 @@ public class SqlLedgerStoreTest {
 
         // Only one record should exist (idempotent atomic merge)
         assertEquals(initialCount + 1, store.count());
+    }
+
+    @Test
+    public void lowerSortingSourceIdDoesNotCreateSecondSqlTransaction() {
+        long initialCount = store.count();
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-02T10:00:00+05:30");
+
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.SPEND, "ANCHOR", List.of("msg-b")));
+
+        try (SqlLedgerStore secondStore = new SqlLedgerStore(dbFile)) {
+            secondStore.save(new NormalizedTxn(
+                    "1234", occurredAt, Direction.DEBIT, new BigDecimal("10.00"),
+                    Category.SPEND, "ANCHOR", List.of("msg-a", "msg-b")));
+        }
+
+        List<NormalizedTxn> anchorRows = store.all().stream()
+                .filter(t -> t.merchant().equals("ANCHOR"))
+                .toList();
+        assertEquals(initialCount + 1, store.count());
+        assertEquals(1, anchorRows.size());
+        assertEquals(List.of("msg-a", "msg-b"), anchorRows.get(0).sourceMessageIds());
+    }
+
+    @Test
+    public void independentIdenticalVisibleTransactionsRemainSeparate() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-03T10:00:00+05:30");
+
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("11.00"),
+                Category.SPEND, "TWIN", List.of("msg-twin-1")));
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("11.00"),
+                Category.SPEND, "TWIN", List.of("msg-twin-2")));
+
+        long twinRows = store.all().stream()
+                .filter(t -> t.merchant().equals("TWIN"))
+                .count();
+        assertEquals(2, twinRows);
+    }
+
+    @Test
+    public void conflictingReuseOfSourceMessageRollsBack() {
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-04T10:00:00+05:30");
+        store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("12.00"),
+                Category.SPEND, "CONFLICT", List.of("msg-conflict")));
+
+        assertThrows(IllegalStateException.class, () -> store.save(new NormalizedTxn(
+                "1234", occurredAt, Direction.DEBIT, new BigDecimal("13.00"),
+                Category.SPEND, "CONFLICT", List.of("msg-conflict"))));
+
+        List<NormalizedTxn> conflictRows = store.all().stream()
+                .filter(t -> t.merchant().equals("CONFLICT"))
+                .toList();
+        assertEquals(1, conflictRows.size());
+        assertEquals(new BigDecimal("12.00"), conflictRows.get(0).amount());
+    }
+
+    @Test
+    public void concurrentIndependentWritesUseSeparateStoreInstances() throws Exception {
+        int threadCount = 10;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch ready = new CountDownLatch(threadCount);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        OffsetDateTime occurredAt = OffsetDateTime.parse("2026-07-05T10:00:00+05:30");
+
+        for (int i = 0; i < threadCount; i++) {
+            final int index = i;
+            futures.add(executor.submit(() -> {
+                ready.countDown();
+                assertTrue(start.await(10, TimeUnit.SECONDS));
+                try (SqlLedgerStore workerStore = new SqlLedgerStore(dbFile)) {
+                    workerStore.save(new NormalizedTxn(
+                            "1234", occurredAt.plusSeconds(index), Direction.DEBIT,
+                            new BigDecimal("20.00").add(new BigDecimal(index + ".00")),
+                            Category.SPEND, "CONCURRENT", List.of("msg-concurrent-" + index)));
+                }
+                return null;
+            }));
+        }
+
+        assertTrue(ready.await(10, TimeUnit.SECONDS));
+        start.countDown();
+        for (java.util.concurrent.Future<?> future : futures) {
+            future.get();
+        }
+        executor.shutdown();
+        assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+
+        long concurrentRows = store.all().stream()
+                .filter(t -> t.merchant().equals("CONCURRENT"))
+                .count();
+        assertEquals(threadCount, concurrentRows);
     }
 }

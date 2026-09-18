@@ -11,8 +11,8 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class BackfillTest {
 
@@ -57,11 +57,57 @@ public class BackfillTest {
             // Give it 100 milliseconds to complete. Since it waits on the latch indefinitely, it will time out.
             Backfill.Result res = backfill.run(100, TimeUnit.MILLISECONDS);
             assertTrue(res.timedOut(), "Backfill should return timedOut=true");
+            assertEquals(Backfill.Status.TIMED_OUT, res.status());
+            assertTrue(res.executorTerminated(), "interruptible worker should terminate after cancellation");
         } catch (IllegalStateException e) {
             // Depending on how interrupted task resolves, it might increment failed or skipped.
             assertTrue(e.getMessage().contains("Backfill completed with"));
         } finally {
             latch.countDown();
+        }
+    }
+
+    @Test
+    public void testBackfillReportsUnterminatedExecutorWhenWorkerIgnoresInterruption() throws Exception {
+        NormalizedTxn t = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                Direction.DEBIT, new BigDecimal("100.00"),
+                Category.SPEND, "MERCHANT", List.of("msg-ignore-interrupt")
+        );
+
+        LedgerStore fakeSql = new LedgerStore() {
+            @Override public List<NormalizedTxn> all() { return List.of(t); }
+            @Override public void save(NormalizedTxn t) {}
+            @Override public long count() { return 1; }
+            @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {}
+            @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
+        };
+
+        CountDownLatch release = new CountDownLatch(1);
+        DocumentStore fakeDoc = new DocumentStore() {
+            @Override
+            public void save(NormalizedTxn txn) {
+                while (release.getCount() > 0) {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException ignored) {
+                        // Deliberately ignore interruption to prove shutdownNow is observable, not magic.
+                    }
+                }
+            }
+            @Override public List<NormalizedTxn> forAccountMonth(String acct, java.time.YearMonth ym) { return List.of(); }
+            @Override public java.util.Map<Category, BigDecimal> categoryTotals(String acct) { return java.util.Map.of(); }
+            @Override public java.util.Optional<NormalizedTxn> byMessageId(String id) { return java.util.Optional.empty(); }
+            @Override public List<NormalizedTxn> scanAllTransactions() { return List.of(); }
+        };
+
+        try {
+            Backfill.Result res = new Backfill(fakeSql, fakeDoc).run(50, TimeUnit.MILLISECONDS);
+            assertTrue(res.timedOut());
+            assertEquals(Backfill.Status.TIMED_OUT, res.status());
+            assertEquals(false, res.executorTerminated());
+        } finally {
+            release.countDown();
         }
     }
 }

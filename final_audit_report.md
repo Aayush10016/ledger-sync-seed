@@ -1,29 +1,30 @@
-# Final Comprehensive Correctness Audit & Fix Report
+# Final Correctness Audit Update
 
-## Overview
-A fresh, evidence-based correctness audit was performed on the `ledger-sync-seed` repository. All previously claimed "fixes" that were incomplete or fundamentally flawed have been replaced with robust, genuinely correct implementations.
-
-This audit explicitly confirmed the following, backed by code changes and test coverage:
-1. **SQL Concurrency:** Upgraded `SqlLedgerStore` to use atomic `MERGE INTO` with a unique `txn_id`. Legacy dirty data in `V2__seed.sql` is automatically deduplicated in memory and cleaned up during migration to prevent constraint violations.
-2. **Reconciliation Correctness:** Categorization logic now dynamically sets `SPEND` for debits and `INCOME` for credits, avoiding blind categorization. Identity uses a strictly deterministic SHA-256 hash.
-3. **Transaction Identity:** Documented and verified that transaction identity uniquely relies on the *lexicographically first* sorted message ID as an anchor.
-4. **Backfill Timeouts:** Forced thread shutdowns via `shutdownNow()` and properly captured exception logic/interrupt status.
-5. **Consistency Check:** Validated that `ConsistencyChecker` is accurately utilizing the canonical `TxnIdentity` logic for bi-directional scans.
-
----
+This report supersedes earlier optimistic claims. The latest audit found that
+several previous fixes were incomplete: transaction identity still drifted when a
+lower-sorting source ID arrived, SQL legacy migration collapsed ambiguous rows,
+`ConsistencyChecker` was still query-specific, and backfill timeout state did
+not prove worker termination.
 
 ## Issues Addressed
 
 | Issue | Severity | Location | Status | Evidence of Fix |
 |-------|----------|----------|--------|-----------------|
-| Synthesized reconciliation record uses UUID.randomUUID() | P0 | IngestService.java | **FIXED** | Replaced with deterministic `recon-` prefix and SHA-256 hash. |
-| Reconciliation record categorized as SPEND without evidence | P0 | IngestService.java | **FIXED** | Added dynamic `Category` assignment based on balance delta direction. |
-| Missing 7500 transaction confirmed absent from corpus | P0 (data) | corpus-a.jsonl | **Root cause confirmed** | Verified absent; synthesis safely creates the gap using deterministic identity. |
-| SqlLedgerStore.save() uses DELETE-then-INSERT with no unique constraint | P0 | SqlLedgerStore.java, V3__add_txn_id.sql | **FIXED** | Added unique `txn_id` constraint and used atomic `MERGE INTO`. |
-| No idempotency test for repeated ingestion (in-memory) | P1 | SqlLedgerStoreTest.java | **FIXED** | Concurrent multi-threaded test explicitly verifies SQL UPSERT idempotency. |
-| ConsistencyChecker SQL dedup key differs from Backfill | P1 | ConsistencyChecker.java | **FIXED** | Confirmed both use identical `TxnIdentity.getId()` deduplication. |
-| Backfill Result has no timedOut field | P1 | Backfill.java, BackfillTest.java | **FIXED** | Exception handling overhauled, explicit timeout trapping and task cancellation implemented. |
+| SQL identity drift after additional source IDs | P0 | `SqlLedgerStore`, `V4__source_message_index.sql` | FIXED | Source-message index retains existing `txn_id`; regression covers lower-sorting source ID through a second store instance. |
+| Legacy migration could merge independent identical visible rows | P0 | `SqlLedgerStore.migrate` | FIXED | New identity is source-set based; identical visible rows with different source IDs are preserved. |
+| DynamoDB save computed a new key before checking existing message IDs | P1 | `DynamoDbLedgerStore.save` | PARTIALLY FIXED | Preflight message-index lookup now routes overlapping source IDs to the existing document key. Integration tests were skipped locally because DynamoDB Local was unavailable. |
+| Consistency checker was query-specific and positional | P1 | `ConsistencyChecker.check` | FIXED | Checker now compares complete SQL/document snapshots and reports deterministic SQL-only, document-only, duplicate, source-collision, and field mismatch divergences. |
+| Backfill timeout did not expose executor termination | P1 | `Backfill.run` | FIXED | `Result` includes lifecycle status and executor termination; tests cover interruptible and interruption-ignoring workers. |
+| Reconciliation synthetic ID used insufficient evidence | P0 | `IngestService` | PARTIALLY FIXED | ID now includes direction, amount, balance-gap reason, checkpoint source IDs, and deterministic gap index. Frozen `Category` prevents a dedicated reconciliation category. |
 
-## Verification Execution
-* **Tests:** `./gradlew clean test` passes perfectly.
-* **Pipeline:** `./verify.sh` successfully parses 522 messages, deduplicates to 257 exactly, identifies the missing debit correctly, and produces 0.00 differences across accounts.
+## Verification
+
+- `gradle clean test`: passed locally under native Gradle using JDK 17. Test report: 33 tests, 0 failures, 5 skipped DynamoDB integration tests.
+- Exact `bash -lc './verify.sh'`: unavailable in this Windows environment because `/bin/bash` is missing.
+- Native equivalent of `verify.sh`: passed. It compiles all main Java files except `DynamoDbLedgerStore.java` and runs `SelfCheck`.
+
+## Remaining Limitations
+
+- Local Java is JDK 17, while the requested target is Java 21.
+- DynamoDB Local integration tests were skipped, so DynamoDB behavior is compile-verified and unit-reasoned here, not integration-verified.
+- The frozen `Category` enum prevents representing reconciliation adjustments with a dedicated category; synthetic records are labeled through merchant/source metadata instead.

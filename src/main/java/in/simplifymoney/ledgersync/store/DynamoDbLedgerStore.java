@@ -150,8 +150,15 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public void save(NormalizedTxn txn) {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();
+
+        ExistingPointer existingPointer = findExistingPointer(txn.sourceMessageIds());
+        if (existingPointer != null) {
+            handleExistingTransaction(txn, existingPointer.targetPk(), existingPointer.targetSk());
+            return;
+        }
         
-        // Strict identity: use the canonical ID (first sorted message ID)
+        // New transaction path. Existing source-message IDs are handled above,
+        // retaining the already assigned document key.
         String txnId = TxnIdentity.getId(txn);
         String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + txnId;
 
@@ -287,9 +294,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
             for (String msgId : txn.sourceMessageIds()) {
                 Optional<NormalizedTxn> existingTarget = byMessageId(msgId);
                 if (existingTarget.isPresent()) {
-                    String existingId = TxnIdentity.getId(existingTarget.get());
-                    String currentId = TxnIdentity.getId(txn);
-                    if (!existingId.equals(currentId)) {
+                    if (!isCompatible(existingTarget.get(), txn)) {
                         throw new IllegalStateException("Conflict: Message ID " + msgId + " belongs to a different transaction!");
                     }
                 }
@@ -301,6 +306,36 @@ public class DynamoDbLedgerStore implements DocumentStore {
             // TransactWriteItems fails entirely. We must retry the update, filtering out existing MSG# indices.
             retryPartialUpdate(txn, acctPk, txnSk);
         }
+    }
+
+    private ExistingPointer findExistingPointer(List<String> sourceMessageIds) {
+        ExistingPointer found = null;
+        for (String msgId : sourceMessageIds) {
+            GetItemResponse res = client.getItem(GetItemRequest.builder()
+                    .tableName(tableName)
+                    .key(Map.of(
+                            "PK", AttributeValue.builder().s("MSG#" + msgId).build(),
+                            "SK", AttributeValue.builder().s("MSG").build()
+                    ))
+                    .build());
+            if (!res.hasItem() || !res.item().containsKey("targetPk") || !res.item().containsKey("targetSk")) {
+                continue;
+            }
+            ExistingPointer current = new ExistingPointer(res.item().get("targetPk").s(), res.item().get("targetSk").s());
+            if (found == null) {
+                found = current;
+            } else if (!found.equals(current)) {
+                throw new IllegalStateException("Source message IDs point to different DynamoDB transactions");
+            }
+        }
+        return found;
+    }
+
+    private boolean isCompatible(NormalizedTxn existing, NormalizedTxn incoming) {
+        return existing.accountLast4().equals(incoming.accountLast4())
+                && existing.occurredAt().toEpochSecond() == incoming.occurredAt().toEpochSecond()
+                && existing.direction() == incoming.direction()
+                && existing.amount().compareTo(incoming.amount()) == 0;
     }
     
     private void retryPartialUpdate(NormalizedTxn txn, String acctPk, String txnSk) {
@@ -365,4 +400,6 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 sortedIds
         );
     }
+
+    private record ExistingPointer(String targetPk, String targetSk) {}
 }

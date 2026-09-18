@@ -263,3 +263,30 @@ We must distinguish between **Measured Results** (obtained from actual execution
 8. **Offline `verify.sh` Compilation**
    - *Decision:* Excluded `DynamoDbLedgerStore.java` from the `verify.sh` wildcard compilation.
    - *Why:* To maintain the strict requirement that `./verify.sh still works` in a zero-network, pure-JDK environment, we must prevent `javac` from attempting to compile the DynamoDB implementation (which relies on external AWS SDK JARs fetched via Gradle and would otherwise break the script).
+
+### Correctness Audit Addendum
+
+The September 2026 audit found that earlier fixes still relied on a drift-prone
+transaction identity and query-specific consistency checks.
+
+- SQL now maintains `ledger_sources`, a source-message index that preserves the
+  already assigned `txn_id` whenever any known source message reappears. This
+  prevents lower-sorting delayed source IDs from creating a second SQL row and
+  keeps independent identical-looking transactions separate when their source
+  messages do not overlap.
+- Legacy rows are migrated inside the same transaction as schema migration.
+  Exact duplicate source sets collapse deterministically; identical visible
+  transactions with different source IDs are preserved.
+- DynamoDB save now preflights existing message-index records before computing a
+  new transaction key, so additional source IDs update the existing document
+  transaction rather than depending on the recalculated stateless identity.
+- `ConsistencyChecker` now compares complete SQL and document snapshots from
+  `sql.all()` and `documents.scanAllTransactions()`, reports SQL-only,
+  document-only, duplicate identity, source collision, and field-level mismatch
+  divergences, and emits deterministic ordering.
+- `Backfill.Result` now includes lifecycle status and executor termination
+  observation. `shutdownNow()` is treated as a cancellation request, not proof
+  that blocked work physically stopped.
+- `verify.sh` still proves only the offline non-Dynamo compile and `SelfCheck`
+  path. It does not compile `DynamoDbLedgerStore.java`, does not exercise
+  DynamoDB Local, and does not prove integration behavior.

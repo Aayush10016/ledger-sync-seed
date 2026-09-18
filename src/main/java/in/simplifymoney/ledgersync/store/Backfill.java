@@ -6,6 +6,7 @@ import in.simplifymoney.ledgersync.util.TxnIdentity;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -32,7 +33,8 @@ public final class Backfill {
         AtomicLong written = new AtomicLong(0);
         AtomicLong skipped = new AtomicLong(0);
         AtomicLong failed = new AtomicLong(0);
-        boolean timedOut = false;
+        Status status = Status.COMPLETED;
+        boolean terminated = true;
 
         try {
             List<NormalizedTxn> allTxns = source.all();
@@ -63,9 +65,10 @@ public final class Backfill {
 
             // Bounded concurrency
             ExecutorService executor = Executors.newFixedThreadPool(10);
+            List<Future<?>> futures = new java.util.ArrayList<>();
             
             for (NormalizedTxn txn : deduplicatedTxns.values()) {
-                executor.submit(() -> {
+                futures.add(executor.submit(() -> {
                     int attempts = 0;
                     boolean success = false;
                     Throwable lastException = null;
@@ -99,14 +102,32 @@ public final class Backfill {
                             " after " + attempts + " attempts. Exception: " + exName + 
                             " - " + exMsg + ". Retryable: " + isRetryable(lastException));
                     }
-                });
+                }));
             }
 
             executor.shutdown();
             if (!executor.awaitTermination(timeout, unit)) {
                 System.err.println("Backfill executor timed out. Cancelling unfinished tasks...");
+                status = Status.TIMED_OUT;
+                for (Future<?> future : futures) {
+                    if (!future.isDone()) {
+                        future.cancel(true);
+                    }
+                }
                 executor.shutdownNow();
-                timedOut = true;
+                terminated = executor.awaitTermination(5, TimeUnit.SECONDS);
+            }
+
+            for (Future<?> future : futures) {
+                if (future.isDone() && !future.isCancelled()) {
+                    try {
+                        future.get();
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        failed.incrementAndGet();
+                        status = Status.FAILED;
+                        System.err.println("Backfill worker escaped with exception: " + e.getCause());
+                    }
+                }
             }
 
             System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
@@ -116,11 +137,16 @@ public final class Backfill {
                 System.err.println("Note: " + failed.get() + " records failed. Checkpointing is not implemented. A re-run will process all items and skip already written ones idempotently.");
                 throw new IllegalStateException("Backfill completed with " + failed.get() + " failures. Check logs for details.");
             }
-            return new Result(read.get(), written.get(), skipped.get(), failed.get(), timedOut);
+            if (status == Status.TIMED_OUT && !terminated) {
+                System.err.println("Backfill timed out and executor did not terminate within the grace period.");
+            }
+            return new Result(read.get(), written.get(), skipped.get(), failed.get(),
+                    status == Status.TIMED_OUT, status, terminated);
         } catch (InterruptedException e) {
             System.err.println("Backfill interrupted.");
             Thread.currentThread().interrupt();
-            return new Result(read.get(), written.get(), skipped.get(), failed.get(), true);
+            return new Result(read.get(), written.get(), skipped.get(), failed.get(),
+                    true, Status.INTERRUPTED, false);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
@@ -144,5 +170,13 @@ public final class Backfill {
         return isRetryable(e.getCause());
     }
 
-    public record Result(long read, long written, long skipped, long failed, boolean timedOut) {}
+    public enum Status {
+        COMPLETED,
+        FAILED,
+        TIMED_OUT,
+        INTERRUPTED
+    }
+
+    public record Result(long read, long written, long skipped, long failed,
+                         boolean timedOut, Status status, boolean executorTerminated) {}
 }

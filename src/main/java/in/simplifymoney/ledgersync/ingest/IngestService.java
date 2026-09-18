@@ -233,6 +233,8 @@ public final class IngestService {
 
             java.math.BigDecimal lastBalance = null;
             java.math.BigDecimal sumSinceLastBalance = java.math.BigDecimal.ZERO;
+            String lastBalanceSource = "";
+            int gapIndex = 0;
 
             for (NormalizedTxn t : txns) {
                 java.math.BigDecimal amt = t.direction() == Direction.DEBIT ? t.amount().negate() : t.amount();
@@ -253,6 +255,8 @@ public final class IngestService {
                         java.math.BigDecimal expected = lastBalance.add(sumSinceLastBalance);
                         if (expected.compareTo(statedBal) != 0) {
                             java.math.BigDecimal diff = statedBal.subtract(expected);
+                            gapIndex++;
+                            String reason = "balance-gap:" + expected.toPlainString() + "->" + statedBal.toPlainString();
                             
                             in.simplifymoney.ledgersync.model.Discrepancy d = new in.simplifymoney.ledgersync.model.Discrepancy(
                                     acct, t.occurredAt(), diff,
@@ -273,7 +277,10 @@ public final class IngestService {
                             // the pipeline against the same corpus produces the exact same reconciliation
                             // record and does NOT create duplicates on a second pass.
                             String baseReconId = "recon-" + sha256Hex(
-                                acct + "|" + synTime.toEpochSecond() + "|" + synAmt.toPlainString());
+                                acct + "|" + synDir.name() + "|" + synAmt.toPlainString()
+                                        + "|" + reason + "|" + lastBalanceSource
+                                        + "|" + String.join(",", t.sourceMessageIds())
+                                        + "|" + gapIndex);
                             
                             String reconId = baseReconId;
                             int seq = 1;
@@ -290,11 +297,13 @@ public final class IngestService {
                             }
 
                             synthesizedTxns.add(new NormalizedTxn(
-                                acct, synTime, synDir, synAmt, synCat, "RECONCILIATION_ADJUSTMENT", List.of(reconId)
+                                acct, synTime, synDir, synAmt, synCat,
+                                "RECONCILIATION_ADJUSTMENT:" + reason, List.of(reconId)
                             ));
                         }
                     }
                     lastBalance = statedBal;
+                    lastBalanceSource = String.join(",", t.sourceMessageIds());
                     sumSinceLastBalance = java.math.BigDecimal.ZERO;
                 }
             }
