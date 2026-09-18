@@ -371,6 +371,14 @@ public class DynamoDbLedgerStoreIntegrationTest {
                 .filter(t -> t.sourceMessageIds().contains("dangle-msg"))
                 .findFirst().orElseThrow();
 
+        String month = stored.occurredAt().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+        String txnSk = "TXN#" + month + "#" + stored.occurredAt().toEpochSecond() + "#" + in.simplifymoney.ledgersync.util.TxnIdentity.getId(stored);
+        client.deleteItem(software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest.builder()
+                .tableName("LedgerStore")
+                .key(java.util.Map.of("PK", software.amazon.awssdk.services.dynamodb.model.AttributeValue.builder().s("ACCT#9999").build(),
+                                      "SK", software.amazon.awssdk.services.dynamodb.model.AttributeValue.builder().s(txnSk).build()))
+                .build());
+
         // Reconstruct SK: TXN#yyyy-MM#epoch#txnId — use scanAll to find the exact key via the store internals
         // We simulate "target gone" by re-saving with a new incompatible amount so the conflict is detected
         NormalizedTxn incompatible = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T11:00:00Z"),
