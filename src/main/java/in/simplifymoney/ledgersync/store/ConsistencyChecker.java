@@ -140,23 +140,34 @@ public final class ConsistencyChecker {
     }
 
     private static void compareFields(String identity, NormalizedTxn sql, NormalizedTxn doc, List<Divergence> out) {
-        compare(identity, "accountLast4", sql.accountLast4(), doc.accountLast4(), out);
-        compare(identity, "occurredAt", sql.occurredAt().toString(), doc.occurredAt().toString(), out);
+        compare(identity, "accountLast4", canonicalString(sql.accountLast4()), canonicalString(doc.accountLast4()), out);
+        compare(identity, "occurredAt", String.valueOf(sql.occurredAt().toInstant().toEpochMilli()),
+                String.valueOf(doc.occurredAt().toInstant().toEpochMilli()), out);
         compare(identity, "direction", sql.direction().name(), doc.direction().name(), out);
         if (sql.amount().compareTo(doc.amount()) != 0) {
             out.add(new Divergence("FIELD_MISMATCH identity=" + identity + " field=amount",
-                    sql.amount().toPlainString(), doc.amount().toPlainString()));
+                    sql.amount().stripTrailingZeros().toPlainString(),
+                    doc.amount().stripTrailingZeros().toPlainString()));
         }
         compare(identity, "category", sql.category().name(), doc.category().name(), out);
-        compare(identity, "merchant", sql.merchant(), doc.merchant(), out);
-        compare(identity, "sourceMessageIds", String.join(",", sql.sourceMessageIds()),
-                String.join(",", doc.sourceMessageIds()), out);
+        compare(identity, "merchant", canonicalString(sql.merchant()), canonicalString(doc.merchant()), out);
+        compare(identity, "sourceMessageIds", canonicalSources(sql), canonicalSources(doc), out);
     }
 
     private static void compare(String identity, String field, String sql, String doc, List<Divergence> out) {
         if (!java.util.Objects.equals(sql, doc)) {
             out.add(new Divergence("FIELD_MISMATCH identity=" + identity + " field=" + field, sql, doc));
         }
+    }
+
+    private static String canonicalString(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String canonicalSources(NormalizedTxn txn) {
+        List<String> sources = new ArrayList<>(txn.sourceMessageIds());
+        java.util.Collections.sort(sources);
+        return String.join(",", sources);
     }
 
     private static final class Snapshot {

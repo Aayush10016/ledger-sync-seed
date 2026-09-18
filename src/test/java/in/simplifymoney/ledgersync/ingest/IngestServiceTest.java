@@ -262,6 +262,26 @@ public class IngestServiceTest {
     }
 
     @Test
+    public void sameSecondSameMerchantDifferentMessagesRemainSeparateWhenIdentityIsUncertain() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("same-second.jsonl");
+
+        String msg1 = "{\"message_id\":\"msg-same-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER. Ref A1\"}";
+        String msg2 = "{\"message_id\":\"msg-same-2\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00Z\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UBER. Ref B2\"}";
+
+        Files.writeString(corpus, msg1 + "\n" + msg2 + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), store).ingestFile(corpus);
+
+        assertEquals(2, store.count());
+        assertEquals(java.util.Set.of("msg-same-1", "msg-same-2"),
+                store.all().stream()
+                        .flatMap(t -> t.sourceMessageIds().stream())
+                        .collect(java.util.stream.Collectors.toSet()));
+    }
+
+    @Test
     public void selectedMerchantAndCategoryDoNotDependOnInputOrder() throws IOException {
         Path tempDir = Files.createTempDirectory("corpus");
         String sms = "{\"message_id\":\"sms-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00+05:30\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UPI/WATER CAN.\"}";

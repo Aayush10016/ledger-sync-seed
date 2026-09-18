@@ -32,7 +32,12 @@ commit SHA and successful GitHub Actions run URL for that SHA.
 
 - Source-message ownership is enforced in SQL and DynamoDB.
 - Same-channel same-second messages with different bodies remain separate.
+- Same-second/same-merchant collisions are tested explicitly and are not merged without stronger evidence.
 - SMS/email corroboration can merge one real cross-channel transaction without depending on merchant string equality.
+- Consistency checking uses the union of complete SQL and DynamoDB snapshots.
+- Consistency checking canonicalizes timestamp instants, source-message ID order, merchant formatting, and decimal values before reporting mismatches.
+- DynamoDB concurrency tests cover same-source idempotency, compatible concurrent source merges, duplicate-new-source retry, conditional conflicts, and atomic no-partial-write behavior.
+- DynamoDB pagination tests cover empty reads, one returned transaction, and forced one-item multipage query/scan/total reads.
 - Merchant and category selection are deterministic and independent of input order.
 - Transfer classification requires transfer-reference evidence, not only amount and timing.
 - Balance reliability exclusions are configurable with `ledger.accounts-without-reliable-balances`; default is `3310`.

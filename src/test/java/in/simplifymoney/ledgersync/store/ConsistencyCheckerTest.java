@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ConsistencyCheckerTest {
@@ -76,6 +77,42 @@ public class ConsistencyCheckerTest {
 
             assertTrue(divergences.stream().anyMatch(d -> d.what().contains("CATEGORY_TOTAL_MISMATCH")));
             assertTrue(divergences.stream().anyMatch(d -> d.what().contains("MESSAGE_INDEX_MISMATCH")));
+        }
+    }
+
+    @Test
+    public void normalizedEquivalentRecordsDoNotProduceFalseDivergences() throws Exception {
+        Path dbFile = Files.createTempDirectory("checker").resolve("db");
+        try (SqlLedgerStore sql = new SqlLedgerStore(dbFile)) {
+            sql.migrate(Path.of(System.getProperty("user.dir"), "db", "migration"));
+            NormalizedTxn sqlTxn = new NormalizedTxn(
+                    "1234",
+                    OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                    Direction.DEBIT,
+                    new BigDecimal("40.00"),
+                    Category.SPEND,
+                    "  SAME MERCHANT  ",
+                    List.of("src-b", "src-a"));
+            NormalizedTxn docTxn = new NormalizedTxn(
+                    "1234",
+                    OffsetDateTime.parse("2026-07-01T04:30:00Z"),
+                    Direction.DEBIT,
+                    new BigDecimal("40.00"),
+                    Category.SPEND,
+                    "SAME MERCHANT",
+                    List.of("src-a", "src-b"));
+            sql.save(sqlTxn);
+
+            String testIdentity = in.simplifymoney.ledgersync.util.TxnIdentity.getId(sqlTxn);
+            List<NormalizedTxn> documentSnapshot = sql.all().stream()
+                    .map(txn -> in.simplifymoney.ledgersync.util.TxnIdentity.getId(txn).equals(testIdentity)
+                            ? docTxn
+                            : txn)
+                    .toList();
+            List<ConsistencyChecker.Divergence> divergences =
+                    new ConsistencyChecker(sql, new FakeDocumentStore(documentSnapshot)).check();
+
+            assertEquals(List.of(), divergences);
         }
     }
 

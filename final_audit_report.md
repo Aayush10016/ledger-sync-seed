@@ -14,6 +14,10 @@ This report reflects the implementation state after the latest correctness pass.
 | Area | Fix |
 | --- | --- |
 | Same-second grouping | Same-channel different-body messages remain separate; same-run grouping is limited to exact duplicates and SMS/email corroboration. |
+| Same-second adversarial test | Same account, same bank timestamp, same direction, same amount, and same merchant still remain separate when same-channel message bodies differ. |
+| Consistency comparison | SQL/document comparison now canonicalizes instant timestamps, source-message ID order, merchant formatting, and decimal values before reporting field divergence. |
+| DynamoDB concurrency | Integration tests cover concurrent same-source writes, compatible concurrent source merges, duplicate-new-source retry, and conflict atomicity. |
+| DynamoDB pagination | Integration tests cover empty reads, exactly one transaction, and forced one-item multipage query/scan/total reads. |
 | Merchant/category selection | Merchant is chosen deterministically from the most informative group evidence; `MICRO` uses any UPI evidence in the merged group, so input order does not decide category. |
 | Transfer detection | Timing and amount are no longer sufficient. Transfer classification also requires matching transfer-reference text such as `IMPS/P2A` or `NEFT`. |
 | Account 3310 balance handling | Balance reliability exclusions are configurable through `ledger.accounts-without-reliable-balances`; default remains `3310` because card alerts report available limit rather than account balance. |
@@ -26,7 +30,8 @@ This report reflects the implementation state after the latest correctness pass.
 
 Final verification must be read from the latest GitHub Actions run for the final commit. Local Windows verification before commit passed:
 
-- `./gradlew clean test`: 58 tests completed, 0 failed, 10 DynamoDB tests skipped locally because DynamoDB Local was not running.
+- `./gradlew clean test`: 62 tests completed, 0 failed, 12 DynamoDB tests skipped locally because DynamoDB Local was not running.
+- `./verify.sh` via Git Bash: passed.
 - `./gradlew -q --console=plain selfCheck`: passed with 522 messages read, 256 transactions written, 43 skipped unsupported messages, 0 malformed records, 0 failed writes, and the expected `-7500.00` discrepancy.
 
 ## Remaining Limits

@@ -11,7 +11,7 @@ Limitation: two independently ingested, non-overlapping source messages for the 
 Problem: every source message must point to exactly one transaction.
 Decision: SQL uses `ledger_sources`; DynamoDB uses `MSG#<messageId>` ownership records written in `TransactWriteItems`.
 Rejected: treating source IDs as an unindexed comma-separated field.
-Evidence: conflict and atomicity tests assert no partial index after failed writes.
+Evidence: conflict, atomicity, and concurrent ownership tests assert no partial index after failed writes and exactly one transaction owner per source ID.
 
 ## 3. DynamoDB document model
 Problem: support account-month, category totals, and message lookup directly.
@@ -23,12 +23,12 @@ Evidence: integration tests query account-month, totals, message lookup, and pag
 Problem: retries and concurrent ingestion must not double-count totals.
 Decision: create transaction, category total update, and message indexes in one DynamoDB transaction; duplicate transactions update message ownership without updating totals.
 Race handling: conditional-write cancellation no longer depends on AWS cancellation-reason ordering. The store re-reads source-message pointers and the candidate transaction key, then only routes to an existing transaction after compatibility checks that include account, time, direction, amount, category, and merchant.
-Evidence: concurrent independent-client test, repeated-ingestion tests, atomicity collision test, and conflicting-category test verify one transaction, one total increment, and no partial message index.
+Evidence: concurrent independent-client, concurrent compatible update, duplicate-new-source retry, repeated-ingestion, atomicity collision, and conflicting-category tests verify one transaction, one total increment, retry correctness, and no partial message index.
 
 ## 5. Pagination
 Problem: DynamoDB Query/Scan returns partial pages.
 Decision: loop on `LastEvaluatedKey` for account-month, category totals, and full scans.
-Evidence: integration tests force one-item pages and verify no missing results.
+Evidence: integration tests cover empty reads, exactly one returned transaction, one-item pages, empty filtered scan pages, and multiple pages without missing results.
 
 ## 6. Backfill
 Problem: SQL may contain historical duplicates and backfill may be rerun.
@@ -39,7 +39,7 @@ Evidence: backfill tests cover timeout, interruption behavior, unterminated work
 Problem: evaluator may mutate DynamoDB records, indexes, or totals.
 Decision: compare complete SQL/document snapshots, field values, duplicate identities, category totals, and message-index ownership.
 Rejected: count-only and positional list comparison.
-Evidence: checker tests cover SQL-only, document-only, field mismatch, duplicate identity, category-total mismatch, and message-index mismatch.
+Evidence: checker tests cover SQL-only, document-only, field mismatch, duplicate identity, category-total mismatch, message-index mismatch, and false-positive resistance for timestamp offsets, source-ID ordering, and merchant formatting.
 
 ## 8. Reconciliation
 Problem: a balance gap is evidence of an unresolved discrepancy, not proof of merchant/time/category.
@@ -69,4 +69,4 @@ Problem: grouping and categorization could become order-dependent or rely on wea
 Decision: preserve source-message ownership as the primary durable identity; within one ingestion run, group exact duplicate messages and SMS/email corroboration only, never same-channel different bodies. Select merchant deterministically from the best available group evidence and derive `MICRO` from any UPI evidence in the group.
 Balance configuration: account balance-gap checks use `ledger.accounts-without-reliable-balances` to exclude accounts whose alerts report limits rather than balances. The default is `3310`.
 Transfer decision: classify `TRANSFER` only when amount/time/opposite-direction evidence is backed by matching transfer-reference text such as `IMPS/P2A` or `NEFT`.
-Evidence: ingestion tests cover order-independent merchant/category selection, same-channel collision preservation, configurable balance exclusions, malformed record accounting, and weak transfer evidence remaining non-transfer.
+Evidence: ingestion tests cover order-independent merchant/category selection, same-second same-channel collision preservation, configurable balance exclusions, malformed record accounting, and weak transfer evidence remaining non-transfer.

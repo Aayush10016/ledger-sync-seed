@@ -179,10 +179,99 @@ public class DynamoDbLedgerStoreIntegrationTest {
     }
 
     @Test
+    public void testConcurrentCompatibleUpdatesKeepOneOwnerPerSourceId() throws Exception {
+        NormalizedTxn seed = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("owned-root"));
+        store.save(seed);
+
+        int workers = 6;
+        CountDownLatch ready = new CountDownLatch(workers);
+        CountDownLatch start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(workers);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        for (int i = 0; i < workers; i++) {
+            final int index = i;
+            futures.add(executor.submit(() -> {
+                DynamoDbLedgerStore workerStore = new DynamoDbLedgerStore(newClient());
+                NormalizedTxn update = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                        Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch",
+                        List.of("owned-root", "owned-extra-" + index));
+                ready.countDown();
+                assertTrue(start.await(10, TimeUnit.SECONDS));
+                workerStore.save(update);
+                return null;
+            }));
+        }
+
+        assertTrue(ready.await(10, TimeUnit.SECONDS));
+        start.countDown();
+        for (var future : futures) {
+            future.get();
+        }
+        executor.shutdown();
+        assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+
+        assertEquals(1, store.scanAllTransactions().size());
+        assertEquals(new BigDecimal("10.50"), store.categoryTotals("9999").get(Category.SPEND));
+        NormalizedTxn root = store.byMessageId("owned-root").orElseThrow();
+        assertEquals(workers + 1, root.sourceMessageIds().size());
+        for (int i = 0; i < workers; i++) {
+            NormalizedTxn byExtra = store.byMessageId("owned-extra-" + i).orElseThrow();
+            assertEquals(root, byExtra);
+        }
+    }
+
+    @Test
+    public void testConcurrentDuplicateNewSourceRetryIsIdempotent() throws Exception {
+        NormalizedTxn seed = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("retry-root"));
+        store.save(seed);
+
+        NormalizedTxn update = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch",
+                List.of("retry-root", "retry-new"));
+        int workers = 6;
+        CountDownLatch ready = new CountDownLatch(workers);
+        CountDownLatch start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(workers);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        for (int i = 0; i < workers; i++) {
+            futures.add(executor.submit(() -> {
+                DynamoDbLedgerStore workerStore = new DynamoDbLedgerStore(newClient());
+                ready.countDown();
+                assertTrue(start.await(10, TimeUnit.SECONDS));
+                workerStore.save(update);
+                return null;
+            }));
+        }
+
+        assertTrue(ready.await(10, TimeUnit.SECONDS));
+        start.countDown();
+        for (var future : futures) {
+            future.get();
+        }
+        executor.shutdown();
+        assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+
+        assertEquals(1, store.scanAllTransactions().size());
+        assertEquals(new BigDecimal("10.50"), store.categoryTotals("9999").get(Category.SPEND));
+        assertEquals(store.byMessageId("retry-root").orElseThrow(), store.byMessageId("retry-new").orElseThrow());
+    }
+
+    @Test
     public void testQueriesAndScanReadAllPages() {
         DynamoDbLedgerStore paged = new DynamoDbLedgerStore(client, 1);
+        assertEquals(List.of(), paged.forAccountMonth("9999", YearMonth.of(2025, 1)));
+        assertEquals(List.of(), paged.scanAllTransactions());
+        assertEquals(java.util.Map.of(), paged.categoryTotals("9999"));
+
         paged.save(new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-31T23:58:00Z"),
                 Direction.DEBIT, new BigDecimal("10.00"), Category.SPEND, "A", List.of("p1")));
+        assertEquals(1, paged.forAccountMonth("9999", YearMonth.of(2026, 7)).size());
+        assertEquals(1, paged.scanAllTransactions().size());
+
         paged.save(new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-31T23:59:00Z"),
                 Direction.CREDIT, new BigDecimal("20.00"), Category.INCOME, "B", List.of("p2")));
         paged.save(new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-15T10:00:00Z"),

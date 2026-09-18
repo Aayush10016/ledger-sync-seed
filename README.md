@@ -139,9 +139,11 @@ discrepancy with source-message evidence.
 
 All items below have been implemented:
 
-1. **`EmailParser`** parses HDFC email alerts and merges them with SMS alerts for
-   the same transaction by matching on account, epoch-second, direction, and
-   amount (merchant excluded because channel naming differs).
+1. **`EmailParser`** parses HDFC email alerts. Cross-channel SMS/email alerts
+   can merge only when the immutable transaction facts match and the channel
+   evidence corroborates the same bank event; same-channel different-body
+   messages remain separate even if account, timestamp, direction, amount, and
+   merchant collide.
 2. **`IciciSmsParser`** handles both ICICI SMS formats present in the corpus.
 3. **Cross-channel deduplication** groups SMS and email alerts into one
    transaction within a single ingestion run. Separate ingestion runs merge
@@ -242,19 +244,18 @@ so the message lookup metric reports the deterministic point-read call count.
    - *Decision:* Used `parallelStream()` and thread-safe collections (`ConcurrentHashMap`, `CopyOnWriteArrayList`, `AtomicLong`) in `ConsistencyChecker` and `Backfill`.
    - *Why:* The `DocumentStore` interface restricts data fetching to individual queries (e.g., `byMessageId`, `forAccountMonth`). Iterating sequentially over 100,000 transactions would result in an extreme N+1 query bottleneck causing the verification to take several minutes. Concurrency maximizes DynamoDB's high throughput capabilities, drastically reducing runtime without altering the frozen interface.
 
-2. **Deduplication Strategy & Over-Aggression Risks**
-   - *Decision:* Kept `IngestService` deduplication as exact matching but normalized across timezones by using Epoch Seconds (`.toEpochSecond()`). The key intentionally excludes `merchant`.
-   - *Why:* Some transactions arriving via both SMS and Email represented the same instant in time but had different UTC offsets (e.g., `+05:30` vs `Z`). By converting them to Epoch Seconds before comparing, we successfully group identical cross-channel alerts without falsely merging separate transactions that just happen to occur close to each other. We purposefully omit `merchant` from the deduplication key because different channels report merchant names differently (e.g., `UPI/WATER CAN` via SMS vs `Water Can` via Email). While this risks merging two *genuinely different* transactions if they occur at the *exact same second* with the *exact same amount* for the *same account*, it is the safest heuristic to prevent mass duplication given the absence of unique bank reference numbers.
+2. **Deduplication Strategy & Collision Safety**
+   - *Decision:* `IngestService` normalizes transaction time to epoch seconds for cross-channel comparison, but it does not merge solely because account, timestamp, direction, and amount match. Same-channel messages with different bodies stay separate. Exact duplicate bodies and corroborating SMS/email pairs may merge.
+   - *Why:* SMS and email alerts can report the same instant with different offsets and merchant wording, so merchant text alone cannot be the identity. Source-message ownership remains the durable identity, and uncertain collisions are preserved as separate transactions instead of being guessed into one row.
 
 3. **TRANSFER Detection Heuristic Safety**
    - *Decision:* Require transfer-reference evidence, such as matching `IMPS/P2A` or `NEFT` merchant/reference text, in addition to opposite directions, identical amounts, different accounts, and a short time window.
    - *Why:* Timing and amount alone are weak evidence and can classify unrelated spend/income as transfers. Reference text makes the heuristic conservative while preserving the known self-transfer pairs in the corpus.
 
-4. **Bi-Directional Consistency Verification & Enumeration Limits**
-   - *Decision:* Implemented a strict size and element-wise comparison between the `sqlList` and `docList` in `ConsistencyChecker`.
-   - *Why:* Rather than merely checking if SQL items exist in DynamoDB, it is critical to verify DynamoDB didn't erroneously create "ghost" transactions. By comparing the size and equality of the lists for each `Account/Month`, we implicitly prove that DynamoDB contains no rogue records *for those periods*.
-   - *Detectable Corruptions:* The checker will successfully detect missing transactions, corrupted fields, duplicated transactions within an active month, and category total discrepancies for all active accounts.
-   - *Limitation (Undetectable Corruptions):* Because the frozen `DocumentStore` interface prohibits an unconstrained `client.scan()`, it is mathematically impossible to discover a deliberately inserted "ghost" account that SQL has never heard of, or a "ghost" month for an existing account outside of its active SQL months. The Consistency Checker provides the strongest proof possible strictly within the bounds of the 3 authorized queries.
+4. **Bi-Directional Consistency Verification**
+   - *Decision:* `ConsistencyChecker` builds its comparison scope from the union of the complete SQL snapshot and complete document-store snapshot, then compares canonicalized normalized records, duplicate identities, category totals, and message-index ownership.
+   - *Why:* A checker that only follows one store's scope can miss records that exist exclusively in the other store. The union-snapshot approach detects SQL-only rows, DynamoDB-only rows, field corruption, duplicate identities, category total drift, and source-message ownership mismatches.
+   - *False-positive control:* Timestamp comparisons use instant milliseconds, source-message IDs are sorted, monetary values use `BigDecimal.compareTo`, and merchant/null handling is canonicalized before reporting divergence.
 
 4. **Resilient Ingestion Parsing**
    - *Decision:* `IngestService` records unsupported messages separately from malformed JSONL records. `SelfCheck` fails if malformed records are present unexpectedly.
