@@ -14,10 +14,10 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class Backfill {
 
-    private final SqlLedgerStore source;
+    private final LedgerStore source;
     private final DocumentStore target;
 
-    public Backfill(SqlLedgerStore source, DocumentStore target) {
+    public Backfill(LedgerStore source, DocumentStore target) {
         this.source = source;
         this.target = target;
     }
@@ -89,16 +89,19 @@ public final class Backfill {
                     
                     if (!success) {
                         failed.incrementAndGet();
+                        String exName = lastException != null ? lastException.getClass().getSimpleName() : "Unknown";
+                        String exMsg = lastException != null ? lastException.getMessage() : "No message";
                         System.err.println("Failed to insert transaction " + TxnIdentity.getId(txn) + 
-                            " after " + attempts + " attempts. Exception: " + lastException.getClass().getSimpleName() + 
-                            " - " + lastException.getMessage() + ". Retryable: " + isRetryable(lastException));
+                            " after " + attempts + " attempts. Exception: " + exName + 
+                            " - " + exMsg + ". Retryable: " + isRetryable(lastException));
                     }
                 });
             }
 
             executor.shutdown();
             if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
-                System.err.println("Backfill executor timed out.");
+                System.err.println("Backfill executor timed out. Cancelling unfinished tasks...");
+                executor.shutdownNow();
                 timedOut = true;
             }
 
@@ -111,8 +114,11 @@ public final class Backfill {
             }
             return new Result(read.get(), written.get(), skipped.get(), failed.get(), timedOut);
         } catch (InterruptedException e) {
+            System.err.println("Backfill interrupted.");
             Thread.currentThread().interrupt();
             return new Result(read.get(), written.get(), skipped.get(), failed.get(), true);
+        } catch (IllegalStateException e) {
+            throw e;
         } catch (Exception e) {
             e.printStackTrace();
             throw new RuntimeException("Backfill failed critically", e);

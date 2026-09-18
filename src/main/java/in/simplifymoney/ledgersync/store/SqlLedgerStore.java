@@ -75,6 +75,47 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 }
                 System.out.println("applied " + name);
             }
+
+            // Java-based backfill for txn_id
+            try (Statement s = conn.createStatement();
+                 ResultSet rs = s.executeQuery("SELECT account_last4, occurred_at, direction, amount, category, merchant, source_message_ids FROM ledger WHERE txn_id IS NULL")) {
+                
+                List<NormalizedTxn> toUpdate = new ArrayList<>();
+                while (rs.next()) {
+                    toUpdate.add(new NormalizedTxn(
+                        rs.getString(1),
+                        OffsetDateTime.parse(rs.getString(2)),
+                        Direction.valueOf(rs.getString(3)),
+                        rs.getBigDecimal(4).setScale(2),
+                        Category.valueOf(rs.getString(5)),
+                        rs.getString(6),
+                        Arrays.stream(rs.getString(7).split(",")).filter(x -> !x.isBlank()).sorted().toList()
+                    ));
+                }
+                
+                if (!toUpdate.isEmpty()) {
+                    java.util.Map<String, NormalizedTxn> deduplicated = new java.util.HashMap<>();
+                    for (NormalizedTxn t : toUpdate) {
+                        deduplicated.merge(in.simplifymoney.ledgersync.util.TxnIdentity.getId(t), t, (e, i) -> {
+                            java.util.Set<String> ids = new java.util.HashSet<>(e.sourceMessageIds());
+                            ids.addAll(i.sourceMessageIds());
+                            java.util.List<String> sorted = new java.util.ArrayList<>(ids);
+                            java.util.Collections.sort(sorted);
+                            return new NormalizedTxn(e.accountLast4(), e.occurredAt(), e.direction(), e.amount(), e.category(), e.merchant(), sorted);
+                        });
+                    }
+                    System.out.println("Backfilling txn_id for " + deduplicated.size() + " deduplicated legacy records...");
+                    
+                    try (Statement del = conn.createStatement()) {
+                        del.execute("DELETE FROM ledger WHERE txn_id IS NULL");
+                    }
+                    
+                    for (NormalizedTxn t : deduplicated.values()) {
+                        save(t);
+                    }
+                }
+            }
+            
         } catch (Exception e) {
             throw new IllegalStateException("migration failed", e);
         }
@@ -87,27 +128,13 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             autoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
 
-            // Idempotency: Delete any existing rows matching the exact transaction identity to avoid duplication
-            // and to avoid deleting independent transactions with the same visible fields.
-            // TxnIdentity is defined by the first sorted message ID, which will be at the start of the string.
-            try (PreparedStatement del = conn.prepareStatement(
-                    "DELETE FROM ledger WHERE account_last4 = ? AND occurred_at = ? AND direction = ? AND amount = ? AND merchant = ? AND (source_message_ids = ? OR source_message_ids LIKE ?)")) {
-                del.setString(1, t.accountLast4());
-                del.setString(2, t.occurredAt().toString());
-                del.setString(3, t.direction().name());
-                del.setBigDecimal(4, t.amount());
-                del.setString(5, t.merchant());
-                
-                String firstMsgId = t.sourceMessageIds().get(0);
-                del.setString(6, firstMsgId);
-                del.setString(7, firstMsgId + ",%");
-                del.executeUpdate();
-            }
-
+            // Idempotency and concurrency safety: Use H2's MERGE INTO to atomically insert or update based on a stable, unique transaction identity (txn_id).
+            String txnId = in.simplifymoney.ledgersync.util.TxnIdentity.getId(t);
+            
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
-                            + " category, merchant, source_message_ids)"
-                            + " VALUES (?,?,?,?,?,?,?)")) {
+                    "MERGE INTO ledger(account_last4, occurred_at, direction, amount,"
+                            + " category, merchant, source_message_ids, txn_id) KEY(txn_id)"
+                            + " VALUES (?,?,?,?,?,?,?,?)")) {
                 ps.setString(1, t.accountLast4());
                 ps.setString(2, t.occurredAt().toString());
                 ps.setString(3, t.direction().name());
@@ -115,6 +142,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 ps.setString(5, t.category().name());
                 ps.setString(6, t.merchant());
                 ps.setString(7, String.join(",", t.sourceMessageIds()));
+                ps.setString(8, txnId);
                 ps.executeUpdate();
             }
 

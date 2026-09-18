@@ -8,9 +8,13 @@ public final class TxnIdentity {
 
     /**
      * Determines a strict, deterministic identity for a transaction.
-     * The unique identity of a transaction is defined by its lowest sorted message ID.
-     * Distinct transactions with identical visible fields but different message IDs 
-     * are treated as distinct entities.
+     * 
+     * Identity Anchor Strategy:
+     * When multiple source messages (e.g. an SMS and an Email) represent the same 
+     * logical transaction, the transaction's canonical identity is anchored to the 
+     * lexicographically lowest message ID among its sources, combined with its visible fields.
+     * This provides a stable, repeatable deterministic identity, while explicitly preventing 
+     * two independent identical transactions (e.g. two $5 coffees at the same minute) from merging.
      */
     public static String getId(NormalizedTxn txn) {
         String m = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();

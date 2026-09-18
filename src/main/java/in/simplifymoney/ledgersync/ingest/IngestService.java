@@ -265,6 +265,7 @@ public final class IngestService {
                             }
                             
                             Direction synDir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
+                            Category synCat = synDir == Direction.DEBIT ? Category.SPEND : Category.INCOME;
                             java.math.BigDecimal synAmt = diff.abs();
                             OffsetDateTime synTime = t.occurredAt().minusSeconds(1);
 
@@ -275,7 +276,7 @@ public final class IngestService {
                                 acct + "|" + synTime.toEpochSecond() + "|" + synAmt.toPlainString());
 
                             synthesizedTxns.add(new NormalizedTxn(
-                                acct, synTime, synDir, synAmt, Category.SPEND, "MISSING_DATA", List.of(reconId)
+                                acct, synTime, synDir, synAmt, synCat, "MISSING_DATA", List.of(reconId)
                             ));
                         }
                     }

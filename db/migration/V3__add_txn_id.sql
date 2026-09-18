@@ -1,0 +1,2 @@
+ALTER TABLE ledger ADD COLUMN IF NOT EXISTS txn_id VARCHAR(100);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_txn_id ON ledger(txn_id);
