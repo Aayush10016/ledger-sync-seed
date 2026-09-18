@@ -1,19 +1,21 @@
 package in.simplifymoney.ledgersync;
 
 import in.simplifymoney.ledgersync.ingest.IngestService;
-import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.parse.Parsers;
 import in.simplifymoney.ledgersync.store.Backfill;
 import in.simplifymoney.ledgersync.store.ConsistencyChecker;
+import in.simplifymoney.ledgersync.store.DynamoDbLedgerAdapter;
 import in.simplifymoney.ledgersync.store.DynamoDbLedgerStore;
 import in.simplifymoney.ledgersync.store.SqlLedgerStore;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.dynamodb.model.DeleteTableRequest;
+import software.amazon.awssdk.services.dynamodb.model.ResourceNotFoundException;
 
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
+import java.time.YearMonth;
 import java.util.concurrent.TimeUnit;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -46,8 +48,9 @@ public class EndToEndTest {
             DynamoDbLedgerStore dynamo = null;
             boolean dynamoReady = false;
             try {
+                resetDynamoTable(client);
                 dynamo = new DynamoDbLedgerStore(client);
-                // Initialize Table
+                client.waiter().waitUntilTableExists(b -> b.tableName("LedgerStore"));
                 System.out.println("Initializing DynamoDB tables...");
                 dynamoReady = true;
             } catch (Exception e) {
@@ -88,6 +91,20 @@ public class EndToEndTest {
             assertEquals(3, txn.sourceMessageIds().size(), "There should be 3 message IDs due to deduplication");
 
             if (dynamoReady) {
+                System.out.println("\nIngesting corpora directly into DynamoDB before backfill...");
+                DynamoDbLedgerAdapter directDynamoStore = new DynamoDbLedgerAdapter(dynamo);
+                IngestService directDynamoIngest = new IngestService(new Parsers(), directDynamoStore);
+                directDynamoIngest.ingestFile(Path.of("fixtures", "corpus-a.jsonl"));
+                directDynamoIngest.ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
+                directDynamoIngest.ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
+
+                var directTxn1 = dynamo.byMessageId("m-00001-31eb24").orElseThrow();
+                var directTxn2 = dynamo.byMessageId("m-99999-newmsg").orElseThrow();
+                assertEquals(directTxn1, directTxn2, "Direct Dynamo ingestion should merge delayed source messages");
+                assertEquals(3, directTxn1.sourceMessageIds().size(), "Direct Dynamo ingestion should be idempotent");
+                assertTrue(dynamo.forAccountMonth("4821", YearMonth.of(2026, 7)).size() > 0,
+                        "Direct Dynamo ingestion should create queryable account-month documents");
+
                 System.out.println("\nBackfilling SQL into DynamoDB before full consistency check...");
                 var backfillResult = new Backfill(sql, dynamo).run(2, TimeUnit.MINUTES);
                 System.out.println("Backfill: " + backfillResult);
@@ -115,6 +132,15 @@ public class EndToEndTest {
                 var catTotals = dynamo.categoryTotals("4821");
                 System.out.println("Category totals for 4821: " + catTotals);
             }
+        }
+    }
+
+    private static void resetDynamoTable(DynamoDbClient client) {
+        try {
+            client.deleteTable(DeleteTableRequest.builder().tableName("LedgerStore").build());
+            client.waiter().waitUntilTableNotExists(b -> b.tableName("LedgerStore"));
+        } catch (ResourceNotFoundException ignored) {
+            // Empty local DynamoDB is fine.
         }
     }
 

@@ -243,4 +243,19 @@ public class DynamoDbLedgerStoreIntegrationTest {
         // Assert the category total remains exactly 20.00 (from txn2 only)
         assertEquals(new BigDecimal("20.00"), store.categoryTotals("9999").get(Category.SPEND));
     }
+
+    @Test
+    public void testConflictingCategoryForOwnedSourceIsRejected() {
+        NormalizedTxn spend = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("owned-msg"));
+        NormalizedTxn micro = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.MICRO, "Merch", List.of("owned-msg", "new-owned-msg"));
+
+        store.save(spend);
+        assertThrows(IllegalStateException.class, () -> store.save(micro));
+
+        assertEquals(1, store.scanAllTransactions().size());
+        assertEquals(new BigDecimal("10.50"), store.categoryTotals("9999").get(Category.SPEND));
+        assertFalse(store.byMessageId("new-owned-msg").isPresent());
+    }
 }

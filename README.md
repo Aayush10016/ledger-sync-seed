@@ -204,10 +204,11 @@ DynamoDB provides strict guarantees around high-performance scaling through its 
 
 ### Performance Metrics (at 100,000 transactions)
 
-We must distinguish between **Measured Results** (obtained from actual execution testing) and **Design Expectations** (derived from the access pattern design but potentially unverified at massive scale without production infrastructure).
-
-#### **Design Expectations** (Theoretical Engine Metrics)
-*Note: These are the theoretical, by-design query efficiency metrics expected by the DynamoDB engine for the 3 allowed access patterns based on our Single Table Design.*
+`src/test/java/in/simplifymoney/ledgersync/PerfTest.java` is the reproducible
+100,000-transaction harness. It inserts a run-isolated account, fails if any
+write fails, and prints the real DynamoDB `ScannedCount`/`Count` values for the
+two Query access patterns. DynamoDB `GetItem` does not expose those counters,
+so the message lookup metric reports the deterministic point-read call count.
 
 #### Q1: `forAccountMonth(accountLast4, month)`
 - **Expected ScannedCount:** `N` (where N is the number of transactions for that specific account in that specific month)
@@ -261,8 +262,8 @@ We must distinguish between **Measured Results** (obtained from actual execution
    - *Why:* By observing the stated balances of the surrounding transactions (`36,054.05` dropping to `28,479.05`), the ledger accurately predicts that `7,575.00` was spent. However, the corpus only contains a `75.00` alert. The bank completely failed to send an SMS or Email for the missing `7,500.00`. My ledger successfully flags this missing money in `reconciliation.json` without blindly altering the ledger to "make it match".
 
 8. **Offline `verify.sh` Compilation**
-   - *Decision:* Excluded `DynamoDbLedgerStore.java` from the `verify.sh` wildcard compilation.
-   - *Why:* To maintain the strict requirement that `./verify.sh still works` in a zero-network, pure-JDK environment, we must prevent `javac` from attempting to compile the DynamoDB implementation (which relies on external AWS SDK JARs fetched via Gradle and would otherwise break the script).
+   - *Decision:* Excluded `DynamoDbLedgerStore.java` and `DynamoDbLedgerAdapter.java` from the `verify.sh` wildcard compilation.
+   - *Why:* To maintain the strict requirement that `./verify.sh still works` in a zero-network, pure-JDK environment, we must prevent `javac` from attempting to compile the DynamoDB implementation and adapter (which rely on external AWS SDK JARs fetched via Gradle and would otherwise break the script).
 
 ### Correctness Audit Addendum
 
@@ -278,8 +279,9 @@ transaction identity and query-specific consistency checks.
   Exact duplicate source sets collapse deterministically; identical visible
   transactions with different source IDs are preserved.
 - DynamoDB save now preflights existing message-index records before computing a
-  new transaction key, so additional source IDs update the existing document
-  transaction rather than depending on the recalculated stateless identity.
+  new transaction key, and rechecks ownership after conditional-write races.
+  Additional compatible source IDs update the existing document transaction
+  without incrementing category totals.
 - `ConsistencyChecker` now compares complete SQL and document snapshots from
   `sql.all()` and `documents.scanAllTransactions()`, reports SQL-only,
   document-only, duplicate identity, source collision, and field-level mismatch
@@ -307,10 +309,15 @@ Document-store access patterns:
 | Category totals | `PK=ACCT#<last4>`, `begins_with(SK, CAT#)` | Loops on `LastEvaluatedKey` | Design expectation: examines and returns at most four category-total rows. |
 | Message lookup | `PK=MSG#<messageId>`, `SK=MSG`, then target `GetItem` | Not paginated; point lookup | Design expectation: one pointer item examined/returned, plus one target item when present. |
 
-These are design expectations from DynamoDB key access, not a measured
-100,000-row benchmark. A reproducible benchmark would generate 100,000
-transactions, run the three APIs with `ReturnConsumedCapacity`, and record
-`Count`/`ScannedCount` from the DynamoDB responses.
+Run the benchmark with DynamoDB Local available:
+
+```bash
+./gradlew testClasses
+./gradlew -q --console=plain runPerf -Pcount=100000
+```
+
+Do not substitute fabricated numbers; use the `PerfTest` output for measured
+values.
 
 Additional documentation:
 
@@ -321,4 +328,4 @@ Known limitations:
 
 - Push events in this fork did not automatically enqueue Actions runs during this audit; workflow runs were verified through `workflow_dispatch`.
 - Local Windows environment lacks a running Docker daemon, so DynamoDB Local integration tests were verified in CI rather than locally.
-- The frozen `Category` enum has no reconciliation-adjustment category; reconciliation adjustments are marked through deterministic source IDs and merchant metadata.
+- The frozen `Category` enum has no reconciliation-adjustment category; balance gaps are therefore kept in reconciliation/discrepancy output, not as synthetic ledger transactions.

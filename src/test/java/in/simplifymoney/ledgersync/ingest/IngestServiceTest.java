@@ -57,6 +57,26 @@ public class IngestServiceTest {
     }
 
     @Test
+    public void testSmsAndEmailForSameTransactionMergeDespiteMerchantDifferences() throws IOException {
+        Path tempDir = Files.createTempDirectory("corpus");
+        Path corpus = tempDir.resolve("test.jsonl");
+
+        String sms = "{\"message_id\":\"sms-1\",\"channel\":\"sms\",\"sender\":\"AD-HDFCBK-S\",\"received_at\":\"2024-05-15T10:00:00+05:30\",\"device_id\":\"d1\",\"body\":\"Rs.50.00 debited from a/c **1234 on 15-05-24 at 10:00 to UPI/UBER INDIA.\"}";
+        String email = "{\"message_id\":\"email-1\",\"channel\":\"email\",\"sender\":\"alerts@hdfcbank.net\",\"received_at\":\"2024-05-15T10:00:05+05:30\",\"device_id\":\"d1\",\"body\":\"Date: Wed, 15 May 2024 10:00:00 +0530\\nSubject: Transaction alert\\n\\nYour account ending 1234 has been debited with INR 50.00.\\nMerchant / Remarks: Uber Trip\"}";
+
+        Files.writeString(corpus, sms + "\n" + email + "\n");
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        IngestService service = new IngestService(new Parsers(), store);
+
+        service.ingestFile(corpus);
+
+        assertEquals(1, store.count());
+        assertEquals(java.util.List.of("sms-1", "email-1"), store.all().get(0).sourceMessageIds());
+    }
+
+
+    @Test
     public void testDifferentEmailBodiesNotMerged() throws IOException {
         Path tempDir = Files.createTempDirectory("corpus");
         Path corpus = tempDir.resolve("test.jsonl");
@@ -98,7 +118,7 @@ public class IngestServiceTest {
 
     @Test
     public void testReconciliationRecordIsDeterministic() throws IOException {
-        // Need to run a corpus that requires a synthesized reconciliation record.
+        // Need to run a corpus that requires a reconciliation discrepancy.
         // We will fake a small dataset that has a balance discrepancy.
         Path tempDir = Files.createTempDirectory("corpus");
         Path corpus = tempDir.resolve("test.jsonl");
@@ -116,13 +136,16 @@ public class IngestServiceTest {
         
         service.ingestFile(corpus);
         
-        // Should have 3 transactions: msg1, msg2, and the recon record for 100.00
-        assertEquals(3, store.count());
+        // Should have only the two observed transactions. The balance gap is
+        // represented as reconciliation data, not a synthetic ledger row.
+        assertEquals(2, store.count());
+        assertEquals(1, store.discrepancies().size());
         
         // Run again
         service.ingestFile(corpus);
         
-        // Count should STILL be 3, proving recon ID is deterministic
-        assertEquals(3, store.count());
+        // Count should STILL be 2 and reconciliation should remain idempotent.
+        assertEquals(2, store.count());
+        assertEquals(1, store.discrepancies().size());
     }
 }

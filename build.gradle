@@ -37,3 +37,13 @@ tasks.register('selfCheck', JavaExec) {
     mainClass = 'in.simplifymoney.ledgersync.SelfCheck'
     classpath = sourceSets.main.runtimeClasspath
 }
+
+tasks.register('runPerf', JavaExec) {
+    group = 'verification'
+    description = 'Runs the DynamoDB Local performance access-pattern harness.'
+    mainClass = 'in.simplifymoney.ledgersync.PerfTest'
+    classpath = sourceSets.test.runtimeClasspath
+    if (project.hasProperty('count')) {
+        args project.property('count').toString()
+    }
+}

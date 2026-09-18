@@ -13,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,9 +21,9 @@ import java.util.stream.Stream;
 /**
  * Reads a corpus of raw messages and puts transactions in the ledger.
  *
- * This is the naive version. It parses each message on its own and saves
- * whatever comes back. It does not ask whether two messages describe the same
- * transaction, and it decides the category from the direction alone.
+ * Multiple alerts for the same underlying bank event are merged before save.
+ * Balance gaps are recorded as discrepancies; they are not inserted as ledger
+ * transactions.
  */
 public final class IngestService {
 
@@ -131,17 +130,17 @@ public final class IngestService {
         Map<String, RawMessage> rawMap = new java.util.HashMap<>();
         for (RawMessage r : raws) rawMap.put(r.messageId(), r);
 
-        // Group by visible fields.
+        // Group by immutable transaction facts. Merchant is intentionally not
+        // part of this key because SMS and email alerts often name the same
+        // counterparty differently.
         List<List<ParsedTxn>> groups = new ArrayList<>();
         for (ParsedTxn p : parsed) {
-            String m = p.merchant() == null ? "" : p.merchant().trim().toLowerCase();
-            String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction().name() + "|" + p.amount().toPlainString() + "|" + m;
+            String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction().name() + "|" + p.amount().toPlainString();
             
             boolean added = false;
             for (List<ParsedTxn> group : groups) {
                 ParsedTxn first = group.get(0);
-                String firstM = first.merchant() == null ? "" : first.merchant().trim().toLowerCase();
-                String firstKey = first.accountLast4() + "|" + first.occurredAt().toEpochSecond() + "|" + first.direction().name() + "|" + first.amount().toPlainString() + "|" + firstM;
+                String firstKey = first.accountLast4() + "|" + first.occurredAt().toEpochSecond() + "|" + first.direction().name() + "|" + first.amount().toPlainString();
                 
                 if (key.equals(firstKey)) {
                     // Check if balances conflict
@@ -223,8 +222,6 @@ public final class IngestService {
             byAcct.computeIfAbsent(t.accountLast4(), k -> new ArrayList<>()).add(t);
         }
         
-        List<NormalizedTxn> synthesizedTxns = new ArrayList<>();
-
         for (Map.Entry<String, List<NormalizedTxn>> entry : byAcct.entrySet()) {
             String acct = entry.getKey();
             if ("3310".equals(acct)) continue;
@@ -233,8 +230,6 @@ public final class IngestService {
 
             java.math.BigDecimal lastBalance = null;
             java.math.BigDecimal sumSinceLastBalance = java.math.BigDecimal.ZERO;
-            String lastBalanceSource = "";
-            int gapIndex = 0;
 
             for (NormalizedTxn t : txns) {
                 java.math.BigDecimal amt = t.direction() == Direction.DEBIT ? t.amount().negate() : t.amount();
@@ -255,9 +250,6 @@ public final class IngestService {
                         java.math.BigDecimal expected = lastBalance.add(sumSinceLastBalance);
                         if (expected.compareTo(statedBal) != 0) {
                             java.math.BigDecimal diff = statedBal.subtract(expected);
-                            gapIndex++;
-                            String reason = "balance-gap:" + expected.toPlainString() + "->" + statedBal.toPlainString();
-                            
                             in.simplifymoney.ledgersync.model.Discrepancy d = new in.simplifymoney.ledgersync.model.Discrepancy(
                                     acct, t.occurredAt(), diff,
                                     "ledger computed " + expected.toPlainString() + " but bank reported " + statedBal.toPlainString()
@@ -268,49 +260,14 @@ public final class IngestService {
                                 existingDiscKeys.add(dKey);
                             }
                             
-                            Direction synDir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
-                            Category synCat = synDir == Direction.DEBIT ? Category.SPEND : Category.INCOME;
-                            java.math.BigDecimal synAmt = diff.abs();
-                            OffsetDateTime synTime = t.occurredAt().minusSeconds(1);
-
-                            // Use a deterministic ID derived from stable fields so that re-running
-                            // the pipeline against the same corpus produces the exact same reconciliation
-                            // record and does NOT create duplicates on a second pass.
-                            String baseReconId = "recon-" + sha256Hex(
-                                acct + "|" + synDir.name() + "|" + synAmt.toPlainString()
-                                        + "|" + reason + "|" + lastBalanceSource
-                                        + "|" + String.join(",", t.sourceMessageIds())
-                                        + "|" + gapIndex);
-                            
-                            String reconId = baseReconId;
-                            int seq = 1;
-                            while (true) {
-                                boolean used = false;
-                                for (NormalizedTxn existingSyn : synthesizedTxns) {
-                                    if (existingSyn.sourceMessageIds().contains(reconId)) {
-                                        used = true;
-                                        break;
-                                    }
-                                }
-                                if (!used) break;
-                                reconId = baseReconId + "-" + seq++;
-                            }
-
-                            synthesizedTxns.add(new NormalizedTxn(
-                                acct, synTime, synDir, synAmt, synCat,
-                                "RECONCILIATION_ADJUSTMENT:" + reason, List.of(reconId)
-                            ));
                         }
                     }
                     lastBalance = statedBal;
-                    lastBalanceSource = String.join(",", t.sourceMessageIds());
                     sumSinceLastBalance = java.math.BigDecimal.ZERO;
                 }
             }
         }
         
-        out.addAll(synthesizedTxns);
-
         // Identify TRANSFER
         categorizeTransfers(out);
         
@@ -358,7 +315,7 @@ public final class IngestService {
 
     /**
      * Returns the lower-case hex SHA-256 digest of the given string.
-     * Used to produce deterministic, collision-resistant reconciliation IDs.
+     * Kept package-visible for any deterministic ID tests that need it.
      */
     static String sha256Hex(String input) {
         try {

@@ -244,33 +244,28 @@ public class DynamoDbLedgerStore implements DocumentStore {
         try {
             client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
         } catch (TransactionCanceledException e) {
-            boolean mainTxnFailed = false;
-            boolean messageIndexFailed = false;
-
-            if (e.cancellationReasons() != null && !e.cancellationReasons().isEmpty()) {
-                if ("ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
-                    mainTxnFailed = true;
-                }
-                
-                for (int i = 2; i < e.cancellationReasons().size(); i++) {
-                    if ("ConditionalCheckFailed".equals(e.cancellationReasons().get(i).code())) {
-                        messageIndexFailed = true;
-                        break;
-                    }
-                }
+            ExistingPointer pointer = findExistingPointer(txn.sourceMessageIds());
+            if (pointer != null) {
+                handleExistingTransaction(txn, pointer.targetPk(), pointer.targetSk());
+                return;
             }
-
-            if (mainTxnFailed) {
+            if (transactionExists(acctPk, txnSk)) {
                 handleExistingTransaction(txn, acctPk, txnSk);
-            } else if (messageIndexFailed) {
-                throw new IllegalStateException("Transaction failed: A message ID already exists and belongs to a different transaction.", e);
-            } else {
-                throw new IllegalStateException("Transaction failed due to unknown reasons: " + e.getMessage(), e);
+                return;
             }
+            throw new IllegalStateException("Transaction failed due to unknown reasons: " + e.getMessage(), e);
         }
     }
 
     private void handleExistingTransaction(NormalizedTxn txn, String acctPk, String txnSk) {
+        Optional<NormalizedTxn> existing = transactionAt(acctPk, txnSk);
+        if (existing.isEmpty()) {
+            throw new IllegalStateException("Existing message index points to a missing transaction");
+        }
+        if (!isCompatible(existing.get(), txn)) {
+            throw new IllegalStateException("Conflict: source messages belong to an incompatible transaction");
+        }
+
         // The transaction already exists. We only need to add any NEW message IDs to it.
         // We use TransactWriteItems to atomically update the sourceMessageIds and add new MSG# indices.
         // We DO NOT update category totals.
@@ -284,6 +279,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                         .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
                         .updateExpression("ADD sourceMessageIds :newIds")
                         .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build()))
+                        .conditionExpression("attribute_exists(PK)")
                         .build())
                 .build());
 
@@ -356,7 +352,27 @@ public class DynamoDbLedgerStore implements DocumentStore {
         return existing.accountLast4().equals(incoming.accountLast4())
                 && existing.occurredAt().toEpochSecond() == incoming.occurredAt().toEpochSecond()
                 && existing.direction() == incoming.direction()
-                && existing.amount().compareTo(incoming.amount()) == 0;
+                && existing.amount().compareTo(incoming.amount()) == 0
+                && existing.category() == incoming.category()
+                && java.util.Objects.equals(existing.merchant(), incoming.merchant());
+    }
+
+    private boolean transactionExists(String pk, String sk) {
+        return transactionAt(pk, sk).isPresent();
+    }
+
+    private Optional<NormalizedTxn> transactionAt(String pk, String sk) {
+        GetItemResponse res = client.getItem(GetItemRequest.builder()
+                .tableName(tableName)
+                .key(Map.of(
+                        "PK", AttributeValue.builder().s(pk).build(),
+                        "SK", AttributeValue.builder().s(sk).build()
+                ))
+                .build());
+        if (!res.hasItem()) {
+            return Optional.empty();
+        }
+        return Optional.of(deserialize(res.item()));
     }
     
     private void retryPartialUpdate(NormalizedTxn txn, String acctPk, String txnSk) {
@@ -394,6 +410,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                             .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
                             .updateExpression("ADD sourceMessageIds :newIds")
                             .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(newIdsToAdd).build()))
+                            .conditionExpression("attribute_exists(PK)")
                             .build())
                     .build());
                     

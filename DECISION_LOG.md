@@ -22,7 +22,8 @@ Evidence: integration tests query account-month, totals, message lookup, and pag
 ## 4. Conditional writes and idempotency
 Problem: retries and concurrent ingestion must not double-count totals.
 Decision: create transaction, category total update, and message indexes in one DynamoDB transaction; duplicate transactions update message ownership without updating totals.
-Evidence: concurrent independent-client test and repeated-ingestion tests verify one transaction and one total increment.
+Race handling: conditional-write cancellation no longer depends on AWS cancellation-reason ordering. The store re-reads source-message pointers and the candidate transaction key, then only routes to an existing transaction after compatibility checks that include account, time, direction, amount, category, and merchant.
+Evidence: concurrent independent-client test, repeated-ingestion tests, atomicity collision test, and conflicting-category test verify one transaction, one total increment, and no partial message index.
 
 ## 5. Pagination
 Problem: DynamoDB Query/Scan returns partial pages.
@@ -42,15 +43,16 @@ Evidence: checker tests cover SQL-only, document-only, field mismatch, duplicate
 
 ## 8. Reconciliation
 Problem: a balance gap is evidence of an unresolved discrepancy, not proof of merchant/time/category.
-Decision: save discrepancy records and label synthetic adjustment transactions with deterministic `recon-` IDs and reconciliation metadata.
-Limitation: frozen `Category` prevents a dedicated reconciliation category.
+Decision: save discrepancy records only. Do not synthesize ledger transactions for missing money, because that would pollute the transaction ledger with inferred events.
+Limitation: frozen `Category` prevents a dedicated reconciliation category, so reconciliation remains outside `NormalizedTxn`.
 
 ## 9. Incident prevention
 Problem: integer rupee amounts were skipped, causing the parser to read available balance as transaction amount.
 Decision: allow optional decimal places in transaction amounts while keeping balance parsing explicit.
-Evidence: amount tests cover `Rs.5` and balance extraction separately.
+Blast radius: 38 messages in `fixtures/corpus-a.jsonl` had a whole-rupee transaction amount followed by a decimal balance or limit that the legacy regex would have selected.
+Evidence: amount tests cover `Rs.5`, multiple monetary values, available balances, limits, OTP exclusion, unrelated numbers, and the exact 38-message corpus count.
 
 ## 10. CI and verification
 Problem: CI previously did not run from push events and lacked a working wrapper/readiness setup.
 Decision: add Gradle wrapper, Java 21 toolchain, DynamoDB dummy AWS credentials, explicit readiness loop, and manual workflow verification.
-Evidence: workflow run `35350797544` passed on commit `f562092`; new changes require a fresh run.
+Evidence: workflow run `35353694066` passed on commit `c8a6bc0`; this fix set requires a fresh run.
