@@ -65,43 +65,49 @@ public final class IngestService {
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
         int written = 0;
+        int failedWrites = 0;
         for (NormalizedTxn t : txns) {
             String key = in.simplifymoney.ledgersync.util.TxnIdentity.getId(t);
             java.util.Set<String> existingIds = existingKeysToMsgIds.get(key);
             
-            if (existingIds == null) {
-                store.save(t);
-                written++;
-            } else {
-                // If the transaction exists, check if there are NEW message IDs not yet saved
-                java.util.List<String> newIds = new java.util.ArrayList<>();
-                for (String msgId : t.sourceMessageIds()) {
-                    if (!existingIds.contains(msgId)) {
-                        newIds.add(msgId);
-                    }
-                }
-                
-                if (!newIds.isEmpty()) {
-                    // Fully merge old and new message IDs, sort and deduplicate them
-                    java.util.List<String> combined = new java.util.ArrayList<>(existingIds);
-                    for (String newId : newIds) {
-                        if (!combined.contains(newId)) {
-                            combined.add(newId);
+            try {
+                if (existingIds == null) {
+                    store.save(t);
+                    written++;
+                } else {
+                    // If the transaction exists, check if there are NEW message IDs not yet saved
+                    java.util.List<String> newIds = new java.util.ArrayList<>();
+                    for (String msgId : t.sourceMessageIds()) {
+                        if (!existingIds.contains(msgId)) {
+                            newIds.add(msgId);
                         }
                     }
-                    java.util.Collections.sort(combined);
+                    
+                    if (!newIds.isEmpty()) {
+                        // Fully merge old and new message IDs, sort and deduplicate them
+                        java.util.List<String> combined = new java.util.ArrayList<>(existingIds);
+                        for (String newId : newIds) {
+                            if (!combined.contains(newId)) {
+                                combined.add(newId);
+                            }
+                        }
+                        java.util.Collections.sort(combined);
 
-                    // Update the existing transaction with the fully merged IDs atomically
-                    store.save(new NormalizedTxn(
-                        t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), 
-                        t.category(), t.merchant(), combined
-                    ));
-                    written++;
+                        // Update the existing transaction with the fully merged IDs atomically
+                        store.save(new NormalizedTxn(
+                            t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), 
+                            t.category(), t.merchant(), combined
+                        ));
+                        written++;
+                    }
                 }
+            } catch (Exception e) {
+                System.err.println("Failed to write transaction " + key + ": " + e.getMessage());
+                failedWrites++;
             }
         }
 
-        return new Stats(messages.size(), written, skipped);
+        return new Stats(messages.size(), written, skipped, failedWrites);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
@@ -136,6 +142,9 @@ public final class IngestService {
             ParsedTxn first = group.get(0);
             uniqueParsed.add(first);
             List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).distinct().toList();
+            if (msgIds.size() > 1) {
+                System.out.println("MERGING IDs: " + msgIds + " for visible fields " + first.accountLast4() + " " + first.amount());
+            }
             Category c = determineCategory(first);
             out.add(new NormalizedTxn(first.accountLast4(), first.occurredAt(), first.direction(),
                     first.amount(), c, first.merchant(), msgIds));
@@ -179,6 +188,16 @@ public final class IngestService {
                             if (!existingDiscKeys.contains(dKey)) {
                                 store.save(d);
                                 existingDiscKeys.add(dKey);
+                                
+                                Direction dir = diff.compareTo(java.math.BigDecimal.ZERO) < 0 ? Direction.DEBIT : Direction.CREDIT;
+                                java.math.BigDecimal absDiff = diff.abs();
+                                Category cat = dir == Direction.DEBIT ? Category.SPEND : Category.INCOME;
+                                
+                                NormalizedTxn syntheticTxn = new NormalizedTxn(
+                                    acct, p.occurredAt().minusSeconds(1), dir, absDiff, cat, "Missing Transaction",
+                                    List.of("synth-" + p.sourceMessageId())
+                                );
+                                out.add(syntheticTxn);
                             }
                         }
                     }
@@ -238,5 +257,5 @@ public final class IngestService {
                 t.amount(), c, t.merchant(), t.sourceMessageIds());
     }
 
-    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}
+    public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped, int failedWrites) {}
 }

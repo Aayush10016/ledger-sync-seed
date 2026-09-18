@@ -15,6 +15,8 @@ public final class InMemoryLedgerStore implements LedgerStore {
 
     @Override public List<NormalizedTxn> all() { return Collections.unmodifiableList(rows); }
 
+    public List<NormalizedTxn> scanAllTransactions() { return all(); }
+
     @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) { disc.add(d); }
 
     @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return Collections.unmodifiableList(disc); }

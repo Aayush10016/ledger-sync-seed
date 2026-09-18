@@ -81,6 +81,23 @@ public class DynamoDbLedgerStoreIntegrationTest {
     }
 
     @Test
+    public void testCompletelyIdenticalPurchasesSameSecond() {
+        NormalizedTxn txn1 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("sms-1"));
+        
+        // txn2 has the exact same visible fields, but a different message ID. It is a distinct identical purchase.
+        NormalizedTxn txn2 = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("sms-2"));
+
+        store.save(txn1);
+        store.save(txn2);
+
+        // Assert BOTH were saved and total is 21.00. The TxnIdentity change prevents DynamoDB from blindly overwriting them.
+        assertEquals(new BigDecimal("21.00"), store.categoryTotals("9999").get(Category.SPEND));
+        assertEquals(2, store.forAccountMonth("9999", java.time.YearMonth.of(2026, 7)).size());
+    }
+
+    @Test
     public void testMessageIndexResolution() {
         NormalizedTxn txn = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
                 Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("msg-x", "msg-y"));

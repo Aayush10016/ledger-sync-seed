@@ -33,6 +33,7 @@ public final class SelfCheck {
         System.out.printf("  messages read       %d%n", stats.messagesRead());
         System.out.printf("  transactions written %d%n", stats.transactionsWritten());
         System.out.printf("  messages skipped    %d%n", stats.messagesSkipped());
+        System.out.printf("  failed writes       %d%n", stats.failedWrites());
 
         List<NormalizedTxn> ledger = store.all();
         Map<Category, BigDecimal> cats = in.simplifymoney.ledgersync.report.Reports

@@ -33,4 +33,7 @@ public interface DocumentStore {
     Optional<NormalizedTxn> byMessageId(String messageId);
 
     void save(NormalizedTxn txn);
+    
+    /** Q4: internal audit tool. Scan the entire store for all transactions. */
+    List<NormalizedTxn> scanAllTransactions();
 }

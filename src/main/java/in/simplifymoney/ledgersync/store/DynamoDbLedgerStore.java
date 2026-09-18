@@ -124,6 +124,29 @@ public class DynamoDbLedgerStore implements DocumentStore {
     }
 
     @Override
+    public List<NormalizedTxn> scanAllTransactions() {
+        ScanRequest req = ScanRequest.builder()
+                .tableName(tableName)
+                .filterExpression("begins_with(SK, :sk)")
+                .expressionAttributeValues(Map.of(
+                        ":sk", AttributeValue.builder().s("TXN#").build()
+                ))
+                .build();
+                
+        List<NormalizedTxn> out = new ArrayList<>();
+        ScanResponse res;
+        do {
+            res = client.scan(req);
+            for (Map<String, AttributeValue> item : res.items()) {
+                out.add(deserialize(item));
+            }
+            req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
+        } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
+        
+        return out;
+    }
+
+    @Override
     public void save(NormalizedTxn txn) {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();

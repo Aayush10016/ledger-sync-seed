@@ -14,6 +14,14 @@ public final class TxnIdentity {
      */
     public static String getId(NormalizedTxn txn) {
         String m = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
-        return txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction().name() + "|" + txn.amount().toPlainString() + "|" + m;
+        String base = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction().name() + "|" + txn.amount().toPlainString() + "|" + m;
+        
+        if (txn.sourceMessageIds() != null && !txn.sourceMessageIds().isEmpty()) {
+            java.util.List<String> sorted = new java.util.ArrayList<>(txn.sourceMessageIds());
+            java.util.Collections.sort(sorted);
+            base += "|" + sorted.get(0);
+        }
+        
+        return java.util.Base64.getEncoder().encodeToString(base.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 }
