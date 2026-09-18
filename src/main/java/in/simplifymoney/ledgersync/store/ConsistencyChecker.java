@@ -1,8 +1,10 @@
 package in.simplifymoney.ledgersync.store;
 
+import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.util.TxnIdentity;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,6 +57,9 @@ public final class ConsistencyChecker {
             }
         }
 
+        compareCategoryTotals(sqlTxns, docTxns, out);
+        compareMessageIndexes(sqlSnapshot, docSnapshot, out);
+
         out.sort(java.util.Comparator
                 .comparing(Divergence::what)
                 .thenComparing(Divergence::inSql)
@@ -74,6 +79,64 @@ public final class ConsistencyChecker {
         System.out.println("==========================================");
 
         return out;
+    }
+
+    private void compareCategoryTotals(List<NormalizedTxn> sqlTxns, List<NormalizedTxn> docTxns, List<Divergence> out) {
+        TreeSet<String> accounts = new TreeSet<>();
+        sqlTxns.forEach(t -> accounts.add(t.accountLast4()));
+        docTxns.forEach(t -> accounts.add(t.accountLast4()));
+
+        Map<String, Map<Category, BigDecimal>> expected = totalsByAccount(sqlTxns);
+        for (String account : accounts) {
+            Map<Category, BigDecimal> docTotals = documents.categoryTotals(account);
+            for (Category category : Category.values()) {
+                BigDecimal sqlValue = expected
+                        .getOrDefault(account, Map.of())
+                        .getOrDefault(category, BigDecimal.ZERO.setScale(2));
+                BigDecimal docValue = docTotals.getOrDefault(category, BigDecimal.ZERO.setScale(2));
+                if (sqlValue.compareTo(docValue) != 0) {
+                    out.add(new Divergence("CATEGORY_TOTAL_MISMATCH account=" + account + " category=" + category,
+                            sqlValue.toPlainString(), docValue.toPlainString()));
+                }
+            }
+        }
+    }
+
+    private static Map<String, Map<Category, BigDecimal>> totalsByAccount(List<NormalizedTxn> txns) {
+        Map<String, Map<Category, BigDecimal>> totals = new TreeMap<>();
+        for (NormalizedTxn txn : txns) {
+            totals.computeIfAbsent(txn.accountLast4(), ignored -> new TreeMap<>())
+                    .merge(txn.category(), txn.amount(), BigDecimal::add);
+        }
+        return totals;
+    }
+
+    private void compareMessageIndexes(Snapshot sqlSnapshot, Snapshot docSnapshot, List<Divergence> out) {
+        TreeSet<String> sourceIds = new TreeSet<>();
+        sourceIds.addAll(sqlSnapshot.sourceToIdentity.keySet());
+        sourceIds.addAll(docSnapshot.sourceToIdentity.keySet());
+
+        for (String sourceId : sourceIds) {
+            String expectedIdentity = sqlSnapshot.sourceToIdentity.get(sourceId);
+            java.util.Optional<NormalizedTxn> byMessage = documents.byMessageId(sourceId);
+            if (expectedIdentity == null) {
+                if (byMessage.isPresent()) {
+                    out.add(new Divergence("MESSAGE_INDEX_EXTRA source=" + sourceId,
+                            "null", TxnIdentity.getId(byMessage.get())));
+                }
+                continue;
+            }
+            if (byMessage.isEmpty()) {
+                out.add(new Divergence("MESSAGE_INDEX_MISSING source=" + sourceId,
+                        expectedIdentity, "null"));
+                continue;
+            }
+            String actualIdentity = TxnIdentity.getId(byMessage.get());
+            if (!expectedIdentity.equals(actualIdentity)) {
+                out.add(new Divergence("MESSAGE_INDEX_MISMATCH source=" + sourceId,
+                        expectedIdentity, actualIdentity));
+            }
+        }
     }
 
     private static void compareFields(String identity, NormalizedTxn sql, NormalizedTxn doc, List<Divergence> out) {
@@ -98,10 +161,14 @@ public final class ConsistencyChecker {
 
     private static final class Snapshot {
         private final Map<String, List<NormalizedTxn>> byIdentity;
+        private final Map<String, String> sourceToIdentity;
         private final List<Divergence> divergences;
 
-        private Snapshot(Map<String, List<NormalizedTxn>> byIdentity, List<Divergence> divergences) {
+        private Snapshot(Map<String, List<NormalizedTxn>> byIdentity,
+                         Map<String, String> sourceToIdentity,
+                         List<Divergence> divergences) {
             this.byIdentity = byIdentity;
+            this.sourceToIdentity = sourceToIdentity;
             this.divergences = divergences;
         }
 
@@ -130,7 +197,7 @@ public final class ConsistencyChecker {
                 }
             }
 
-            return new Snapshot(byIdentity, divergences);
+            return new Snapshot(byIdentity, sourceToIdentity, divergences);
         }
     }
 

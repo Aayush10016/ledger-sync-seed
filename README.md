@@ -290,3 +290,35 @@ transaction identity and query-specific consistency checks.
 - `verify.sh` still proves only the offline non-Dynamo compile and `SelfCheck`
   path. It does not compile `DynamoDbLedgerStore.java`, does not exercise
   DynamoDB Local, and does not prove integration behavior.
+
+### Task 2-4 Verification Notes
+
+Current implementation focus:
+
+- Task 2 ingestion parses SMS and email alerts, excludes non-transaction messages that do not match supported bank formats, deduplicates within a corpus, preserves source-message IDs, and emits `ledger.json`, `summary.json`, and `reconciliation.json`.
+- Task 3 incident prevention is in `Amounts`: integer amounts such as `Rs.5` are parsed as the transaction amount, while `Avl Bal` is parsed only by the balance-specific regex.
+- Task 4 uses DynamoDB Local through Docker Compose. CI starts it before integration tests and fails if it cannot be reached.
+
+Document-store access patterns:
+
+| Query | Key pattern | Pagination | Examined vs returned at 100,000 txns |
+| --- | --- | --- | --- |
+| Account/month transactions | `PK=ACCT#<last4>`, `begins_with(SK, TXN#yyyy-MM)` | Loops on `LastEvaluatedKey` | Design expectation: examined equals returned for that account/month query. |
+| Category totals | `PK=ACCT#<last4>`, `begins_with(SK, CAT#)` | Loops on `LastEvaluatedKey` | Design expectation: examines and returns at most four category-total rows. |
+| Message lookup | `PK=MSG#<messageId>`, `SK=MSG`, then target `GetItem` | Not paginated; point lookup | Design expectation: one pointer item examined/returned, plus one target item when present. |
+
+These are design expectations from DynamoDB key access, not a measured
+100,000-row benchmark. A reproducible benchmark would generate 100,000
+transactions, run the three APIs with `ReturnConsumedCapacity`, and record
+`Count`/`ScannedCount` from the DynamoDB responses.
+
+Additional documentation:
+
+- Engineering decisions: `DECISION_LOG.md`
+- AI disclosure: `AI_DISCLOSURE.md`
+
+Known limitations:
+
+- Push events in this fork did not automatically enqueue Actions runs during this audit; workflow runs were verified through `workflow_dispatch`.
+- Local Windows environment lacks a running Docker daemon, so DynamoDB Local integration tests were verified in CI rather than locally.
+- The frozen `Category` enum has no reconciliation-adjustment category; reconciliation adjustments are marked through deterministic source IDs and merchant metadata.

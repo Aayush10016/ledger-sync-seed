@@ -16,9 +16,15 @@ public class DynamoDbLedgerStore implements DocumentStore {
 
     private final DynamoDbClient client;
     private final String tableName = "LedgerStore";
+    private final Integer pageLimit;
 
     public DynamoDbLedgerStore(DynamoDbClient client) {
+        this(client, null);
+    }
+
+    DynamoDbLedgerStore(DynamoDbClient client, Integer pageLimit) {
         this.client = client;
+        this.pageLimit = pageLimit;
         createTableIfNotExists();
     }
 
@@ -46,22 +52,28 @@ public class DynamoDbLedgerStore implements DocumentStore {
         String pk = "ACCT#" + accountLast4;
         String skPrefix = "TXN#" + month.format(DateTimeFormatter.ofPattern("yyyy-MM"));
 
-        QueryRequest req = QueryRequest.builder()
+        QueryRequest.Builder builder = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
                 .expressionAttributeValues(Map.of(
                         ":pk", AttributeValue.builder().s(pk).build(),
                         ":sk", AttributeValue.builder().s(skPrefix).build()
                 ))
-                .scanIndexForward(false) // Newest first
-                .build();
-
-        QueryResponse res = client.query(req);
+                .scanIndexForward(false); // Newest first
+        if (pageLimit != null) {
+            builder.limit(pageLimit);
+        }
+        QueryRequest req = builder.build();
 
         List<NormalizedTxn> out = new ArrayList<>();
-        for (Map<String, AttributeValue> item : res.items()) {
-            out.add(deserialize(item));
-        }
+        QueryResponse res;
+        do {
+            res = client.query(req);
+            for (Map<String, AttributeValue> item : res.items()) {
+                out.add(deserialize(item));
+            }
+            req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
+        } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
         return out;
     }
 
@@ -70,23 +82,29 @@ public class DynamoDbLedgerStore implements DocumentStore {
         String pk = "ACCT#" + accountLast4;
         String skPrefix = "CAT#";
 
-        QueryRequest req = QueryRequest.builder()
+        QueryRequest.Builder builder = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
                 .expressionAttributeValues(Map.of(
                         ":pk", AttributeValue.builder().s(pk).build(),
                         ":sk", AttributeValue.builder().s(skPrefix).build()
-                ))
-                .build();
-
-        QueryResponse res = client.query(req);
+                ));
+        if (pageLimit != null) {
+            builder.limit(pageLimit);
+        }
+        QueryRequest req = builder.build();
 
         Map<Category, BigDecimal> out = new LinkedHashMap<>();
-        for (Map<String, AttributeValue> item : res.items()) {
-            String catStr = item.get("SK").s().substring(4); // Remove "CAT#"
-            BigDecimal total = new BigDecimal(item.get("total_amount").n());
-            out.put(Category.valueOf(catStr), total);
-        }
+        QueryResponse res;
+        do {
+            res = client.query(req);
+            for (Map<String, AttributeValue> item : res.items()) {
+                String catStr = item.get("SK").s().substring(4); // Remove "CAT#"
+                BigDecimal total = new BigDecimal(item.get("total_amount").n());
+                out.put(Category.valueOf(catStr), total);
+            }
+            req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
+        } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
         return out;
     }
 
@@ -125,14 +143,17 @@ public class DynamoDbLedgerStore implements DocumentStore {
 
     @Override
     public List<NormalizedTxn> scanAllTransactions() {
-        ScanRequest req = ScanRequest.builder()
+        ScanRequest.Builder builder = ScanRequest.builder()
                 .tableName(tableName)
                 .filterExpression("begins_with(SK, :sk)")
                 .expressionAttributeValues(Map.of(
                         ":sk", AttributeValue.builder().s("TXN#").build()
-                ))
-                .build();
-                
+                ));
+        if (pageLimit != null) {
+            builder.limit(pageLimit);
+        }
+        ScanRequest req = builder.build();
+
         List<NormalizedTxn> out = new ArrayList<>();
         ScanResponse res;
         do {
