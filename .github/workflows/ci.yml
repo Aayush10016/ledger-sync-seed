@@ -41,6 +41,9 @@ jobs:
       - name: compile and self-check
         run: ./verify.sh
 
+      - name: Run Performance Benchmark
+        run: ./gradlew -q --console=plain runPerf -Pcount=100000
+
       - name: Stop DynamoDB Local
         if: always()
         run: docker compose down

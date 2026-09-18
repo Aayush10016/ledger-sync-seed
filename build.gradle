@@ -10,6 +10,12 @@ java {
     toolchain { languageVersion = JavaLanguageVersion.of(21) }
 }
 
+tasks.withType(JavaExec).configureEach {
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
 repositories { mavenCentral() }
 
 dependencies {

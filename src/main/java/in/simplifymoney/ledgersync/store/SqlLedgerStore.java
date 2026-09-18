@@ -253,6 +253,25 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             insert.setString(1, sourceId);
             insert.setString(2, txnId);
             insert.executeUpdate();
+        } catch (SQLException e) {
+            // "23" is the standard SQLState class for integrity constraint violations.
+            if (e.getSQLState() != null && e.getSQLState().startsWith("23")) {
+                try (PreparedStatement existing = conn.prepareStatement(
+                        "SELECT txn_id FROM ledger_sources WHERE source_message_id = ?")) {
+                    existing.setString(1, sourceId);
+                    try (ResultSet rs = existing.executeQuery()) {
+                        if (rs.next()) {
+                            String current = rs.getString(1);
+                            if (!txnId.equals(current)) {
+                                throw new SQLException("source message " + sourceId
+                                        + " already maps to transaction " + current);
+                            }
+                            return; // It was safely inserted concurrently by another thread
+                        }
+                    }
+                }
+            }
+            throw e;
         }
     }
 
