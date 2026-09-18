@@ -32,7 +32,8 @@ public final class Backfill {
         System.out.println("Starting High-Performance Backfill...");
         AtomicLong read = new AtomicLong(0);
         AtomicLong written = new AtomicLong(0);
-        AtomicLong skipped = new AtomicLong(0);
+        AtomicLong sourceDeduplicated = new AtomicLong(0);
+        AtomicLong targetSkipped = new AtomicLong(0);
         AtomicLong failed = new AtomicLong(0);
         Status status = Status.COMPLETED;
         boolean terminated = true;
@@ -53,15 +54,23 @@ public final class Backfill {
                 String deduplicationKey = TxnIdentity.getId(txn);
                 
                 deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
-                    skipped.incrementAndGet();
+                    sourceDeduplicated.incrementAndGet();
                     java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
                     mergedIds.addAll(incoming.sourceMessageIds());
                     java.util.List<String> sorted = new java.util.ArrayList<>(mergedIds);
                     java.util.Collections.sort(sorted);
+                    String bankRef = existing.bankReferenceId();
+                    if (incoming.bankReferenceId() != null) {
+                        if (bankRef == null) {
+                            bankRef = incoming.bankReferenceId();
+                        } else if (!bankRef.equals(incoming.bankReferenceId())) {
+                            throw new IllegalStateException("Deduplication conflict: different bank references: " + bankRef + " vs " + incoming.bankReferenceId());
+                        }
+                    }
                     return new NormalizedTxn(
                         existing.accountLast4(), existing.occurredAt(), existing.direction(),
                         existing.amount(), existing.category(), existing.merchant(),
-                        sorted
+                        sorted, bankRef
                     );
                 });
             }
@@ -71,6 +80,7 @@ public final class Backfill {
             List<Future<?>> futures = new java.util.ArrayList<>();
             
             for (NormalizedTxn txn : deduplicatedTxns.values()) {
+                String deduplicationKey = TxnIdentity.getId(txn);
                 futures.add(executor.submit(() -> {
                     int attempts = 0;
                     boolean success = false;
@@ -79,9 +89,16 @@ public final class Backfill {
                     while (attempts < 3 && !success) {
                         attempts++;
                         try {
-                            target.save(txn);
-                            written.incrementAndGet();
-                            success = true;
+                            // Safe Resume Support: Skip if it already exists
+                            java.util.Optional<NormalizedTxn> existingTarget = target.byMessageId(txn.sourceMessageIds().get(0));
+                            if (existingTarget.isPresent() && TxnIdentity.getId(existingTarget.get()).equals(deduplicationKey)) {
+                                targetSkipped.incrementAndGet();
+                                success = true; // Pretend it succeeded
+                            } else {
+                                target.save(txn);
+                                written.incrementAndGet();
+                                success = true;
+                            }
                         } catch (Exception e) {
                             lastException = e;
                             if (classify(e) == FailureType.NON_RETRYABLE) {
@@ -146,7 +163,7 @@ public final class Backfill {
             }
 
             System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
-                    + ", Skipped: " + skipped.get() + ", Failed: " + failed.get());
+                    + ", Source Deduplicated: " + sourceDeduplicated.get() + ", Target Skipped: " + targetSkipped.get() + ", Failed: " + failed.get());
                     
             if (failed.get() > 0) {
                 status = Status.FAILED;
@@ -155,12 +172,12 @@ public final class Backfill {
             if (status == Status.TIMED_OUT && !terminated) {
                 System.err.println("Backfill timed out and executor did not terminate within the grace period.");
             }
-            return new Result(read.get(), written.get(), skipped.get(), failed.get(),
+            return new Result(read.get(), written.get(), sourceDeduplicated.get(), targetSkipped.get(), failed.get(),
                     timedOut, status, terminated, List.copyOf(failureDetails));
         } catch (InterruptedException e) {
             System.err.println("Backfill interrupted.");
             Thread.currentThread().interrupt();
-            return new Result(read.get(), written.get(), skipped.get(), failed.get(),
+            return new Result(read.get(), written.get(), sourceDeduplicated.get(), targetSkipped.get(), failed.get(),
                     true, Status.INTERRUPTED, false, List.copyOf(failureDetails));
         } catch (IllegalStateException e) {
             throw e;
@@ -172,16 +189,27 @@ public final class Backfill {
 
     private FailureType classify(Throwable e) {
         if (e == null) return FailureType.NON_RETRYABLE;
-        String name = e.getClass().getSimpleName();
-        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        if (name.contains("ProvisionedThroughputExceededException") ||
-            name.contains("InternalServerError") ||
-            name.contains("ThrottlingException") ||
-            name.contains("RequestLimitExceeded") ||
-            msg.contains("rate limit") || msg.contains("throughput") ||
-            msg.contains("timeout")) {
+        
+        if (e instanceof software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException ||
+            e instanceof software.amazon.awssdk.services.dynamodb.model.RequestLimitExceededException ||
+            e instanceof software.amazon.awssdk.services.dynamodb.model.InternalServerErrorException) {
             return FailureType.RETRYABLE;
         }
+        
+        if (e instanceof software.amazon.awssdk.core.exception.ApiCallTimeoutException ||
+            e instanceof software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException ||
+            e instanceof software.amazon.awssdk.core.exception.RetryableException) {
+            return FailureType.RETRYABLE;
+        }
+
+        if (e instanceof software.amazon.awssdk.awscore.exception.AwsServiceException) {
+            software.amazon.awssdk.awscore.exception.AwsServiceException awsEx = 
+                (software.amazon.awssdk.awscore.exception.AwsServiceException) e;
+            if (awsEx.isThrottlingException() || awsEx.statusCode() >= 500) {
+                return FailureType.RETRYABLE;
+            }
+        }
+
         if (e.getCause() != null) {
             return classify(e.getCause());
         }
@@ -200,7 +228,7 @@ public final class Backfill {
         NON_RETRYABLE
     }
 
-    public record Result(long read, long written, long skipped, long failed,
+    public record Result(long read, long written, long sourceDeduplicated, long targetSkipped, long failed,
                          boolean timedOut, Status status, boolean executorTerminated,
                          List<FailureDetail> failureDetails) {}
 

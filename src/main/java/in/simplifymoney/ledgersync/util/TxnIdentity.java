@@ -16,7 +16,7 @@ public final class TxnIdentity {
      */
     public static String getId(NormalizedTxn txn) {
         if (txn.bankReferenceId() != null) {
-            return "ref-" + sha256Hex(txn.bankReferenceId());
+            return "ref-" + sha256Hex(txn.accountLast4() + "|" + txn.bankReferenceId());
         }
         if (txn.sourceMessageIds() == null || txn.sourceMessageIds().isEmpty()) {
             throw new IllegalArgumentException("Transactions must have at least one source message ID to guarantee uniqueness.");

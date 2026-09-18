@@ -44,7 +44,7 @@ public final class EmailParser implements MessageParser {
                 java.time.format.DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm:ss Z"));
                 
         java.util.regex.Matcher r = REF.matcher(body);
-        String bankRef = r.find() ? r.group(1).trim() : null;
+        String bankRef = r.find() ? Parsers.normalizeBankReference(r.group(1)) : null;
                 
         return Optional.of(new ParsedTxn(acct, dt, dir, amount, merchant, null, m.messageId(), bankRef));
     }

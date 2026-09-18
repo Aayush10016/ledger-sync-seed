@@ -101,9 +101,14 @@ public final class SelfCheck {
                 failed = true;
             }
             
+            BigDecimal difference = running.subtract(closing);
             System.out.printf("           balance from ledger %s, bank says %s, difference %s%n",
                     running.toPlainString(), closing.toPlainString(),
-                    running.subtract(closing).toPlainString());
+                    difference.toPlainString());
+                    
+            if (difference.compareTo(BigDecimal.ZERO) != 0) {
+                store.save(new in.simplifymoney.ledgersync.model.Discrepancy(e.getKey(), java.time.OffsetDateTime.now(), difference, "Unexplained balance difference"));
+            }
         }
 
         System.out.println("\nDISCREPANCIES");

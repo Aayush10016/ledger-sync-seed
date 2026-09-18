@@ -396,6 +396,66 @@ public class DynamoDbLedgerStoreIntegrationTest {
         // The old transaction was deleted directly, leaving its category total orphaned.
         // The new save added its amount (99.00) to the existing total (15.00).
         assertEquals(new BigDecimal("114.00"), store.categoryTotals("9999").get(Category.SPEND));
+        
+        // Rebuild category totals to fix the orphaned aggregate
+        store.rebuildCategoryTotals("9999");
+        assertEquals(new BigDecimal("99.00"), store.categoryTotals("9999").get(Category.SPEND));
+    }
+
+    @Test
+    public void testConcurrentWritesAndMerges() throws Exception {
+        int threads = 10;
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(threads);
+
+        for (int i = 0; i < threads; i++) {
+            executor.submit(() -> {
+                try {
+                    latch.await();
+                    NormalizedTxn t = new NormalizedTxn(
+                            "8888", OffsetDateTime.parse("2026-07-04T12:00:00Z"),
+                            Direction.DEBIT, new BigDecimal("50.00"),
+                            Category.SPEND, "Coffee", List.of("msg-concurrent-1")
+                    );
+                    store.save(t);
+                } catch (Exception e) {
+                    // conflicts might throw exceptions
+                } finally {
+                    done.countDown();
+                }
+            });
+        }
+
+        latch.countDown();
+        assertTrue(done.await(10, java.util.concurrent.TimeUnit.SECONDS));
+        executor.shutdown();
+
+        assertEquals(1, store.scanAllTransactions().size());
+        assertEquals(new BigDecimal("50.00"), store.categoryTotals("8888").get(Category.SPEND));
+    }
+
+    @Test
+    public void testIdenticalTimestampsDoNotCollide() throws Exception {
+        OffsetDateTime identicalTime = OffsetDateTime.parse("2026-07-04T12:00:00Z");
+        
+        NormalizedTxn t1 = new NormalizedTxn(
+                "7777", identicalTime, Direction.DEBIT, new BigDecimal("10.00"),
+                Category.SPEND, "Shop 1", List.of("msg-time-1")
+        );
+        NormalizedTxn t2 = new NormalizedTxn(
+                "7777", identicalTime, Direction.DEBIT, new BigDecimal("20.00"),
+                Category.SPEND, "Shop 2", List.of("msg-time-2")
+        );
+        
+        store.save(t1);
+        store.save(t2);
+        
+        // Since TxnIdentity includes the source message ID, they generate different txnIds.
+        // The SK will have different txnIds appended, ensuring they don't collide despite identical timestamps.
+        List<NormalizedTxn> txns = store.scanAllTransactions();
+        assertEquals(2, txns.size());
+        assertEquals(new BigDecimal("30.00"), store.categoryTotals("7777").get(Category.SPEND));
     }
 
     @Test

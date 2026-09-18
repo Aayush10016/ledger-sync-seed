@@ -135,6 +135,9 @@ public final class ConsistencyChecker {
             if (!expectedIdentity.equals(actualIdentity)) {
                 out.add(new Divergence("MESSAGE_INDEX_MISMATCH source=" + sourceId,
                         expectedIdentity, actualIdentity));
+            } else if (!byMessage.get().sourceMessageIds().contains(sourceId)) {
+                out.add(new Divergence("MESSAGE_INDEX_ORPHANED source=" + sourceId,
+                        "transaction claims ownership", "transaction missing source ID"));
             }
         }
     }

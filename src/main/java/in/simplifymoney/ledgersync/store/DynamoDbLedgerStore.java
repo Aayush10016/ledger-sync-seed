@@ -108,6 +108,48 @@ public class DynamoDbLedgerStore implements DocumentStore {
         return out;
     }
 
+    public void rebuildCategoryTotals(String accountLast4) {
+        String pk = "ACCT#" + accountLast4;
+        String skPrefix = "TXN#";
+        
+        QueryRequest req = QueryRequest.builder()
+                .tableName(tableName)
+                .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
+                .expressionAttributeValues(Map.of(
+                        ":pk", AttributeValue.builder().s(pk).build(),
+                        ":sk", AttributeValue.builder().s(skPrefix).build()
+                ))
+                .build();
+                
+        List<NormalizedTxn> txns = new ArrayList<>();
+        QueryResponse res;
+        do {
+            res = client.query(req);
+            for (Map<String, AttributeValue> item : res.items()) {
+                txns.add(deserialize(item));
+            }
+            req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
+        } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
+        
+        Map<Category, BigDecimal> newTotals = new HashMap<>();
+        for (NormalizedTxn txn : txns) {
+            newTotals.merge(txn.category(), txn.amount(), BigDecimal::add);
+        }
+        
+        for (Category cat : Category.values()) {
+            BigDecimal amt = newTotals.getOrDefault(cat, BigDecimal.ZERO);
+            String sk = "CAT#" + cat.name();
+            client.putItem(PutItemRequest.builder()
+                .tableName(tableName)
+                .item(Map.of(
+                    "PK", AttributeValue.builder().s(pk).build(),
+                    "SK", AttributeValue.builder().s(sk).build(),
+                    "total_amount", AttributeValue.builder().n(amt.toPlainString()).build()
+                ))
+                .build());
+        }
+    }
+
     @Override
     public Optional<NormalizedTxn> byMessageId(String messageId) {
         String pk = "MSG#" + messageId;

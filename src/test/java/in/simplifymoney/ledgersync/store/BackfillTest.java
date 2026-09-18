@@ -148,4 +148,90 @@ public class BackfillTest {
         assertEquals("1234", result.failureDetails().get(0).account());
         assertEquals(Backfill.FailureType.NON_RETRYABLE, result.failureDetails().get(0).failureType());
     }
+
+    @Test
+    public void testBankReferenceRetainedDuringMerge() throws Exception {
+        NormalizedTxn t1 = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                Direction.DEBIT, new BigDecimal("100.00"),
+                Category.SPEND, "MERCHANT", List.of("msg-1"),
+                "REF123"
+        ); 
+
+        NormalizedTxn t2 = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                Direction.DEBIT, new BigDecimal("100.00"),
+                Category.SPEND, "MERCHANT", List.of("msg-2"),
+                "REF123"
+        );
+
+        LedgerStore fakeSql = new LedgerStore() {
+            @Override public List<NormalizedTxn> all() { return List.of(t1, t2); } 
+            @Override public void save(NormalizedTxn t) {}
+            @Override public long count() { return 2; }
+            @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {}
+            @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
+        };
+
+        java.util.concurrent.atomic.AtomicReference<NormalizedTxn> saved = new java.util.concurrent.atomic.AtomicReference<>();
+        DocumentStore fakeDoc = new DocumentStore() {
+            @Override public void save(NormalizedTxn txn) {
+                saved.set(txn);
+            }
+            @Override public List<NormalizedTxn> forAccountMonth(String acct, java.time.YearMonth ym) { return List.of(); }
+            @Override public java.util.Map<Category, BigDecimal> categoryTotals(String acct) { return java.util.Map.of(); }
+            @Override public java.util.Optional<NormalizedTxn> byMessageId(String id) { return java.util.Optional.empty(); }
+            @Override public List<NormalizedTxn> scanAllTransactions() { return List.of(); }
+        };
+
+        Backfill backfill = new Backfill(fakeSql, fakeDoc);
+        Backfill.Result result = backfill.run(1, TimeUnit.MINUTES);
+
+        assertEquals(1, result.written());
+        assertEquals(1, result.sourceDeduplicated()); // One merged
+        assertEquals("REF123", saved.get().bankReferenceId());
+        assertEquals(2, saved.get().sourceMessageIds().size());
+    }
+
+    @Test
+    public void testBackfillSkipsExistingTransactions() throws Exception {
+        NormalizedTxn t1 = new NormalizedTxn(
+                "1234", OffsetDateTime.parse("2026-07-01T10:00:00+05:30"),
+                Direction.DEBIT, new BigDecimal("100.00"),
+                Category.SPEND, "MERCHANT", List.of("msg-skip-1"),
+                "REF123"
+        ); 
+
+        LedgerStore fakeSql = new LedgerStore() {
+            @Override public List<NormalizedTxn> all() { return List.of(t1); } 
+            @Override public void save(NormalizedTxn t) {}
+            @Override public long count() { return 1; }
+            @Override public void save(in.simplifymoney.ledgersync.model.Discrepancy d) {}
+            @Override public List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies() { return List.of(); }
+        };
+
+        java.util.concurrent.atomic.AtomicInteger saveCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        DocumentStore fakeDoc = new DocumentStore() {
+            @Override public void save(NormalizedTxn txn) {
+                saveCount.incrementAndGet();
+            }
+            @Override public List<NormalizedTxn> forAccountMonth(String acct, java.time.YearMonth ym) { return List.of(); }
+            @Override public java.util.Map<Category, BigDecimal> categoryTotals(String acct) { return java.util.Map.of(); }
+            @Override public java.util.Optional<NormalizedTxn> byMessageId(String id) {
+                if ("msg-skip-1".equals(id)) {
+                    return java.util.Optional.of(t1);
+                }
+                return java.util.Optional.empty();
+            }
+            @Override public List<NormalizedTxn> scanAllTransactions() { return List.of(t1); }
+        };
+
+        Backfill backfill = new Backfill(fakeSql, fakeDoc);
+        Backfill.Result result = backfill.run(1, TimeUnit.MINUTES);
+
+        assertEquals(0, result.written()); // Should be 0 since it already exists
+        assertEquals(0, result.sourceDeduplicated());
+        assertEquals(1, result.targetSkipped());
+        assertEquals(0, saveCount.get()); // The save method shouldn't be called
+    }
 }

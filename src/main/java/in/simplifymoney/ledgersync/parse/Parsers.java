@@ -23,4 +23,10 @@ public final class Parsers {
         }
         return Optional.empty();
     }
+
+    public static String normalizeBankReference(String ref) {
+        if (ref == null) return null;
+        String normalized = ref.trim().toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9]", "");
+        return normalized.isEmpty() ? null : normalized;
+    }
 }

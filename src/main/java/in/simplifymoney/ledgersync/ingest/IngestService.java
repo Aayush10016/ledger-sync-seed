@@ -168,34 +168,30 @@ public final class IngestService {
                     boolean refConflict = false;
                     boolean refMatch = false;
                     String ref1 = p.bankReferenceId();
-                    if (ref1 != null) {
-                        for (ParsedTxn item : group) {
-                            if (item.bankReferenceId() != null) {
-                                RawMessage rawP = rawMap.get(p.sourceMessageId());
-                                RawMessage rawItem = rawMap.get(item.sourceMessageId());
-                                boolean isCrossChannel = rawP != null && rawItem != null && !rawP.channel().equals(rawItem.channel());
-                                
-                                if (ref1.equals(item.bankReferenceId())) {
-                                    refMatch = true;
-                                } else if (!isCrossChannel) {
-                                    // Only conflict if same channel. Cross-channel often has different ref formats.
-                                    refConflict = true;
-                                }
+                    
+                    for (ParsedTxn item : group) {
+                        String ref2 = item.bankReferenceId();
+                        if (ref1 != null && ref2 != null) {
+                            if (ref1.equals(ref2)) {
+                                refMatch = true;
+                            } else {
+                                refConflict = true; // Any conflict in bank references means they are distinct
                             }
                         }
                     }
                     
-                    // Check channel conflicts: same channel but different body
+                    // Check channel conflicts: same channel means they MUST be distinct if no bank reference matched
+                    // UNLESS they are identical duplicate messages (same body)
                     boolean channelConflict = false;
                     RawMessage rawP = rawMap.get(p.sourceMessageId());
                     if (rawP != null) {
                         for (ParsedTxn item : group) {
                             RawMessage rawItem = rawMap.get(item.sourceMessageId());
                             if (rawItem != null && rawP.channel().equals(rawItem.channel())) {
-                                if (rawP.channel().equals("email")) {
-                                    channelConflict = true; // Two emails in same second = distinct purchases
-                                } else if (!rawP.body().equals(rawItem.body())) {
-                                    channelConflict = true; // Distinct SMS
+                                if (!refMatch) {
+                                    if (!rawP.body().trim().equals(rawItem.body().trim())) {
+                                        channelConflict = true; // Same channel, no bank ref match, and different bodies = distinct
+                                    }
                                 }
                             }
                         }
@@ -419,6 +415,12 @@ public final class IngestService {
     }
 
     private static boolean hasTransferEvidence(NormalizedTxn left, NormalizedTxn right) {
+        if (left.bankReferenceId() != null && right.bankReferenceId() != null) {
+            if (!left.bankReferenceId().equals(right.bankReferenceId())) {
+                return false; // Conflicting bank references mean they cannot be the same transfer
+            }
+        }
+        
         String leftMerchant = normalizeTransferMerchant(left.merchant());
         String rightMerchant = normalizeTransferMerchant(right.merchant());
         return !leftMerchant.isBlank()

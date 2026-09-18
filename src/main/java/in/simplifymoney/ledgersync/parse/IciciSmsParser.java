@@ -45,7 +45,7 @@ public final class IciciSmsParser implements MessageParser {
             Direction d = "debited".equals(v1.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
 
             Matcher r = Pattern.compile("(?i)(?:ref no|upi ref|reference|ref)\\.?\\s*[:\\-]?\\s*([A-Za-z0-9]{6,})").matcher(m.body());
-            String bankRef = r.find() ? r.group(1).trim() : null;
+            String bankRef = r.find() ? Parsers.normalizeBankReference(r.group(1)) : null;
 
             return Optional.of(new ParsedTxn(v1.group("acct"), at, d, amount,
                     v1.group("merchant").trim(), Amounts.statedBalance(m.body()),
@@ -62,7 +62,7 @@ public final class IciciSmsParser implements MessageParser {
             Direction d = "Dr".equals(v2.group("dir")) ? Direction.DEBIT : Direction.CREDIT;
 
             Matcher r = Pattern.compile("(?i)(?:ref no|upi ref|reference|ref)\\.?\\s*[:\\-]?\\s*([A-Za-z0-9]{6,})").matcher(m.body());
-            String bankRef = r.find() ? r.group(1).trim() : null;
+            String bankRef = r.find() ? Parsers.normalizeBankReference(r.group(1)) : null;
 
             return Optional.of(new ParsedTxn(v2.group("acct"), at, d, amount,
                     v2.group("merchant").trim(), Amounts.statedBalance(m.body()),

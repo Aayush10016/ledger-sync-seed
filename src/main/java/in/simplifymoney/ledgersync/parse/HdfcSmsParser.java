@@ -77,7 +77,7 @@ public final class HdfcSmsParser implements MessageParser {
         if (amount == null || at == null) return Optional.empty();
         
         Matcher r = Pattern.compile("(?i)(?:ref no|upi ref|reference|ref)\\.?\\s*[:\\-]?\\s*([A-Za-z0-9]{6,})").matcher(m.body());
-        String bankRef = r.find() ? r.group(1).trim() : null;
+        String bankRef = r.find() ? Parsers.normalizeBankReference(r.group(1)) : null;
         
         return Optional.of(new ParsedTxn(acct, at, dir, amount, merchant.trim(),
                 Amounts.statedBalance(m.body()), m.messageId(), bankRef));
