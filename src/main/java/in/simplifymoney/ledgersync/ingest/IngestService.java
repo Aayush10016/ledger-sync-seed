@@ -334,17 +334,26 @@ public final class IngestService {
         boolean hasEmail = false;
         for (ParsedTxn p : group) {
             RawMessage raw = rawMap.get(p.sourceMessageId());
-            if (p.merchant() != null) {
-                if (best == null) {
+            if (p.merchant() == null) continue;
+            if (best == null) {
+                best = p.merchant();
+                hasEmail = (raw != null && "email".equals(raw.channel()));
+                continue;
+            }
+            boolean candidateIsEmail = (raw != null && "email".equals(raw.channel()));
+            // 1. Prefer email over SMS
+            if (candidateIsEmail && !hasEmail) {
+                best = p.merchant();
+                hasEmail = true;
+            } else if (candidateIsEmail == hasEmail) {
+                // Same channel priority — prefer longer description
+                if (p.merchant().length() > best.length()) {
                     best = p.merchant();
-                    hasEmail = (raw != null && "email".equals(raw.channel()));
-                } else if (raw != null && "email".equals(raw.channel()) && !hasEmail) {
-                    // Prefer email merchants, they are usually more descriptive than SMS
-                    best = p.merchant();
-                    hasEmail = true;
-                } else if (p.merchant().length() > best.length() && (raw == null || "email".equals(raw.channel()) == hasEmail)) {
-                    // Prefer longer descriptive string if same channel
-                    best = p.merchant();
+                } else if (p.merchant().length() == best.length()) {
+                    // Tie-break: lexicographically smaller for determinism
+                    if (p.merchant().compareTo(best) < 0) {
+                        best = p.merchant();
+                    }
                 }
             }
         }

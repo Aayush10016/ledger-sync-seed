@@ -1,15 +1,16 @@
 # Final Submission Report
 
-This report intentionally avoids hard-coded historical commit IDs. For the
-submitted state, use:
+## Traceability
 
-```bash
-git rev-parse HEAD
-gh run list --repo Aayush10016/ledger-sync-seed --commit "$(git rev-parse HEAD)"
-```
+| Field | Value |
+|---|---|
+| **Latest commit SHA** | *(run `git rev-parse HEAD` after pushing this commit)* |
+| **Commit link** | `https://github.com/Aayush10016/ledger-sync-seed/commit/<SHA>` |
+| **CI run URL** | *(fill in after the GitHub Actions run triggered by this push succeeds — see Actions tab)* |
+| **Dataset** | `fixtures/corpus-a.jsonl` — SHA-256: run `sha256sum fixtures/corpus-a.jsonl` |
+| **Java version** | 21 (Temurin, via `actions/setup-java@v4`) |
 
-The final response accompanying the submission should cite the exact pushed
-commit SHA and successful GitHub Actions run URL for that SHA.
+> **Note:** The CI run for this commit will upload two artifacts: `junit-test-results` (JUnit XML) and `benchmark-output` (raw `runPerf` stdout with commit SHA, Java version, and OS). These are preserved for 90 days and provide independently reproducible evidence.
 
 ## Validation Scope
 

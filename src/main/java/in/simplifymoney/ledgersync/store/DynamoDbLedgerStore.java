@@ -349,12 +349,14 @@ public class DynamoDbLedgerStore implements DocumentStore {
     }
 
     private boolean isCompatible(NormalizedTxn existing, NormalizedTxn incoming) {
+        // Compatibility is based on the immutable transaction facts that define TxnIdentity.
+        // Merchant and category are intentionally excluded: SMS and email alerts may name the
+        // same payee differently, and category is derived (not a bank-asserted fact), so
+        // including either would cause false conflicts on legitimate cross-channel merges.
         return existing.accountLast4().equals(incoming.accountLast4())
                 && existing.occurredAt().toEpochSecond() == incoming.occurredAt().toEpochSecond()
                 && existing.direction() == incoming.direction()
-                && existing.amount().compareTo(incoming.amount()) == 0
-                && existing.category() == incoming.category()
-                && java.util.Objects.equals(existing.merchant(), incoming.merchant());
+                && existing.amount().compareTo(incoming.amount()) == 0;
     }
 
     private boolean transactionExists(String pk, String sk) {

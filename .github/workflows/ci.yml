@@ -70,12 +70,35 @@ jobs:
           if tests == 0 or skips != 0 or fails != 0 or errs != 0:
               sys.exit(1)
           PY
-        
+
+      - name: Upload JUnit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-results
+          path: build/test-results/test/
+          retention-days: 90
+
       - name: compile and self-check
         run: ./verify.sh
 
       - name: Run Performance Benchmark
-        run: ./gradlew -q --console=plain runPerf -Pcount=100000
+        run: |
+          echo "=== Benchmark metadata ===" | tee build/benchmark-output.txt
+          echo "Commit SHA: $GITHUB_SHA" | tee -a build/benchmark-output.txt
+          echo "Java: $(java -version 2>&1 | head -1)" | tee -a build/benchmark-output.txt
+          echo "OS: $(uname -srm)" | tee -a build/benchmark-output.txt
+          echo "Dataset: fixtures/corpus-a.jsonl (count=100000 synthetic)" | tee -a build/benchmark-output.txt
+          echo "==========================" | tee -a build/benchmark-output.txt
+          ./gradlew -q --console=plain runPerf -Pcount=100000 | tee -a build/benchmark-output.txt
+
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-output
+          path: build/benchmark-output.txt
+          retention-days: 90
 
       - name: Stop DynamoDB Local
         if: always()
