@@ -36,11 +36,6 @@ public final class IngestService {
         this.store = store;
     }
 
-    private static String generateDedupKey(String accountLast4, OffsetDateTime occurredAt, Direction direction, java.math.BigDecimal amount, String merchant) {
-        String m = merchant == null ? "" : merchant.trim().toLowerCase();
-        return accountLast4 + "|" + occurredAt.toEpochSecond() + "|" + direction.name() + "|" + amount.toPlainString() + "|" + m;
-    }
-
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
         List<ParsedTxn> parsedTxns = new ArrayList<>();
@@ -64,14 +59,14 @@ public final class IngestService {
         List<NormalizedTxn> existingTxns = store.all();
         java.util.Map<String, java.util.Set<String>> existingKeysToMsgIds = new java.util.HashMap<>();
         for (NormalizedTxn e : existingTxns) {
-            String key = generateDedupKey(e.accountLast4(), e.occurredAt(), e.direction(), e.amount(), e.merchant());
+            String key = in.simplifymoney.ledgersync.util.TxnIdentity.getId(e);
             existingKeysToMsgIds.computeIfAbsent(key, k -> new java.util.HashSet<>()).addAll(e.sourceMessageIds());
         }
 
         List<NormalizedTxn> txns = deduplicateAndCategorize(parsedTxns);
         int written = 0;
         for (NormalizedTxn t : txns) {
-            String key = generateDedupKey(t.accountLast4(), t.occurredAt(), t.direction(), t.amount(), t.merchant());
+            String key = in.simplifymoney.ledgersync.util.TxnIdentity.getId(t);
             java.util.Set<String> existingIds = existingKeysToMsgIds.get(key);
             
             if (existingIds == null) {
@@ -130,7 +125,8 @@ public final class IngestService {
         // Deduplicate
         Map<String, List<ParsedTxn>> groups = new LinkedHashMap<>();
         for (ParsedTxn p : parsed) {
-            String key = generateDedupKey(p.accountLast4(), p.occurredAt(), p.direction(), p.amount(), p.merchant());
+            String m = p.merchant() == null ? "" : p.merchant().trim().toLowerCase();
+            String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction().name() + "|" + p.amount().toPlainString() + "|" + m;
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(p);
         }
 
@@ -139,7 +135,7 @@ public final class IngestService {
         for (List<ParsedTxn> group : groups.values()) {
             ParsedTxn first = group.get(0);
             uniqueParsed.add(first);
-            List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).toList();
+            List<String> msgIds = group.stream().map(ParsedTxn::sourceMessageId).distinct().toList();
             Category c = determineCategory(first);
             out.add(new NormalizedTxn(first.accountLast4(), first.occurredAt(), first.direction(),
                     first.amount(), c, first.merchant(), msgIds));

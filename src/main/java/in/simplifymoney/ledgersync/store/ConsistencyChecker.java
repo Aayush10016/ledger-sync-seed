@@ -1,17 +1,13 @@
 package in.simplifymoney.ledgersync.store;
 
+import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import in.simplifymoney.ledgersync.util.TxnIdentity;
+
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.stream.Collectors;
 
 /**
  * Proves the two stores agree, and says precisely where they do not.
- *
- * NOT IMPLEMENTED - this is yours.
- *
- * We will run your checker against a document store we have deliberately
- * altered. It has to find what we changed and name it. A checker that only
- * compares row counts will not.
  */
 public final class ConsistencyChecker {
 
@@ -38,7 +34,7 @@ public final class ConsistencyChecker {
         // SQL store is dirty, we need to deduplicate it first exactly as backfill does
         java.util.Map<String, in.simplifymoney.ledgersync.model.NormalizedTxn> deduplicatedTxns = new java.util.LinkedHashMap<>();
         for (in.simplifymoney.ledgersync.model.NormalizedTxn txn : allSqlTxns) {
-            String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount();
+            String deduplicationKey = TxnIdentity.getId(txn);
             deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                 java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
                 mergedIds.addAll(incoming.sourceMessageIds());
@@ -77,7 +73,7 @@ public final class ConsistencyChecker {
             for (String msgId : txn.sourceMessageIds()) {
                 in.simplifymoney.ledgersync.model.NormalizedTxn existing = msgIdToTxn.putIfAbsent(msgId, txn);
                 if (existing != null && !existing.equals(txn)) {
-                    out.add(new Divergence("Duplicate message ID in SQL: " + msgId, existing.toString(), txn.toString()));
+                    out.add(new Divergence("Duplicate message ID mapped to different transactions in SQL: " + msgId, existing.toString(), txn.toString()));
                 }
             }
         }
@@ -109,12 +105,6 @@ public final class ConsistencyChecker {
         });
 
         // Parallelize Q2: categoryTotals
-        // Note on DocumentStore enumeration limitation:
-        // Because the DocumentStore interface is frozen and only provides queries by `accountLast4`, 
-        // we can only verify consistency for accounts derived from the SQL store (`allAccounts`).
-        // To natively discover document-side "ghost" records for entirely new accounts or months, 
-        // we would require an enumeration method like `client.scan()` which is explicitly forbidden
-        // by the assignment's rule: "DocumentStore declares the only three queries this service makes".
         System.out.println("Checking Q2 (categoryTotals) concurrently...");
         allAccounts.parallelStream().forEach(acct -> {
             java.util.Map<in.simplifymoney.ledgersync.model.Category, java.math.BigDecimal> sTot = sqlTotals.getOrDefault(acct, new java.util.concurrent.ConcurrentHashMap<>());
@@ -139,7 +129,7 @@ public final class ConsistencyChecker {
             in.simplifymoney.ledgersync.model.NormalizedTxn dTxn = documents.byMessageId(msgId).orElse(null);
             
             if (sTxn != null && dTxn == null) {
-                out.add(new Divergence("byMessageId " + msgId, sTxn.toString(), "null"));
+                out.add(new Divergence("byMessageId " + msgId, sTxn.toString(), "null (SQL-only record)"));
             } else if (sTxn == null && dTxn != null) {
                 out.add(new Divergence("byMessageId " + msgId, "null", dTxn.toString()));
             } else if (sTxn != null && dTxn != null && !sTxn.equals(dTxn)) {
@@ -147,11 +137,19 @@ public final class ConsistencyChecker {
             }
         });
 
-        System.out.println("Consistency Check complete. Found " + out.size() + " divergences.");
+        System.out.println("==========================================");
+        System.out.println("Consistency Check Summary:");
+        System.out.println("- Checks performed: forAccountMonth, categoryTotals, byMessageId");
+        System.out.println("- Checks skipped: Discovery of document-only 'ghost' accounts or transactions.");
+        System.out.println("- Completeness Status: INCOMPLETE. DocumentStore interface limitations (no scan/enumerate API) prevent discovering accounts or transactions that exist solely in DynamoDB but not in SQL.");
+        System.out.println("- Recommendation: Extend DocumentStore with a `List<String> getAllAccounts()` or `scan()` method.");
+        System.out.println("- SQL records inspected: " + cleanSqlTxns.size());
+        System.out.println("- Divergences found: " + out.size());
+        System.out.println("==========================================");
+
         return new java.util.ArrayList<>(out);
     }
 
     /** One place the two stores disagree. */
     public record Divergence(String what, String inSql, String inDocuments) {}
 }
-

@@ -2,6 +2,7 @@ package in.simplifymoney.ledgersync.store;
 
 import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import in.simplifymoney.ledgersync.util.TxnIdentity;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
@@ -56,7 +57,6 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 .build();
 
         QueryResponse res = client.query(req);
-        System.out.println("forAccountMonth - ScannedCount: " + res.scannedCount() + ", Count: " + res.count());
 
         List<NormalizedTxn> out = new ArrayList<>();
         for (Map<String, AttributeValue> item : res.items()) {
@@ -80,7 +80,6 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 .build();
 
         QueryResponse res = client.query(req);
-        System.out.println("categoryTotals - ScannedCount: " + res.scannedCount() + ", Count: " + res.count());
 
         Map<Category, BigDecimal> out = new LinkedHashMap<>();
         for (Map<String, AttributeValue> item : res.items()) {
@@ -105,8 +104,6 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 .build();
 
         GetItemResponse res = client.getItem(req);
-        // getItem inherently examines 1 item and returns 1 item (if exists)
-        System.out.println("byMessageId - Item found: " + res.hasItem());
 
         if (res.hasItem()) {
             Map<String, AttributeValue> item = res.item();
@@ -130,10 +127,10 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public void save(NormalizedTxn txn) {
         String month = txn.occurredAt().format(DateTimeFormatter.ofPattern("yyyy-MM"));
         String acctPk = "ACCT#" + txn.accountLast4();
-        // Deterministic SK based on transaction attributes ensures true idempotency for retries
-        String merchantComponent = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
-        String hash = String.valueOf(Math.abs(Objects.hash(txn.direction(), txn.amount(), merchantComponent)));
-        String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + hash;
+        
+        // Strict identity: use the canonical ID (first sorted message ID)
+        String txnId = TxnIdentity.getId(txn);
+        String txnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + txnId;
 
         Map<String, AttributeValue> item = new HashMap<>();
         item.put("PK", AttributeValue.builder().s(acctPk).build());
@@ -146,74 +143,13 @@ public class DynamoDbLedgerStore implements DocumentStore {
         if (txn.merchant() != null) {
             item.put("merchant", AttributeValue.builder().s(txn.merchant()).build());
         }
-        // Check if transaction already exists (Idempotent Update Check)
-        GetItemRequest checkReq = GetItemRequest.builder()
-                .tableName(tableName)
-                .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
-                .build();
-        GetItemResponse checkRes = client.getItem(checkReq);
-
-        if (checkRes.hasItem()) {
-            // Transaction already exists! We only add new message index items if there are any.
-            // We ALSO update the main transaction's sourceMessageIds string set.
-            // We DO NOT update category totals.
-            List<String> existingIds = checkRes.item().containsKey("sourceMessageIds") 
-                ? checkRes.item().get("sourceMessageIds").ss() 
-                : new ArrayList<>();
-            
-            List<TransactWriteItem> writeItems = new ArrayList<>();
-            for (String msgId : txn.sourceMessageIds()) {
-                if (!existingIds.contains(msgId)) {
-                    Map<String, AttributeValue> msgItem = new HashMap<>();
-                    msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
-                    msgItem.put("SK", AttributeValue.builder().s("MSG").build());
-                    msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
-                    msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
-                    writeItems.add(TransactWriteItem.builder()
-                            .put(Put.builder()
-                                    .tableName(tableName)
-                                    .item(msgItem)
-                                    .conditionExpression("attribute_not_exists(PK)")
-                                    .build())
-                            .build());
-                }
-            }
-            if (!writeItems.isEmpty()) {
-                writeItems.add(TransactWriteItem.builder()
-                        .update(Update.builder()
-                                .tableName(tableName)
-                                .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
-                                .updateExpression("ADD sourceMessageIds :newIds")
-                                .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build()))
-                                .build())
-                        .build());
-
-                try {
-                    client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
-                } catch (TransactionCanceledException e) {
-                    boolean messageIndexCollision = false;
-                    if (e.cancellationReasons() != null) {
-                        for (var reason : e.cancellationReasons()) {
-                            if ("ConditionalCheckFailed".equals(reason.code())) {
-                                messageIndexCollision = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (messageIndexCollision) {
-                        throw new IllegalStateException("Transaction update failed: A new message ID belongs to a different transaction.", e);
-                    }
-                    throw new IllegalStateException("Message index update failed: " + e.getMessage(), e);
-                }
-            }
-            return;
-        }
-
         if (!txn.sourceMessageIds().isEmpty()) {
             item.put("sourceMessageIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build());
         }
 
         List<TransactWriteItem> writeItems = new ArrayList<>();
+        
+        // 1. Put Main Transaction (fail if exists)
         writeItems.add(TransactWriteItem.builder()
                 .put(Put.builder()
                         .tableName(tableName)
@@ -222,7 +158,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                         .build())
                 .build());
 
-        // Update Category Total
+        // 2. Update Category Total
         String catSk = "CAT#" + txn.category().name();
         writeItems.add(TransactWriteItem.builder()
                 .update(Update.builder()
@@ -238,7 +174,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                         .build())
                 .build());
 
-        // Message Indices
+        // 3. Message Indices
         for (String msgId : txn.sourceMessageIds()) {
             Map<String, AttributeValue> msgItem = new HashMap<>();
             msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
@@ -261,7 +197,6 @@ public class DynamoDbLedgerStore implements DocumentStore {
             boolean messageIndexFailed = false;
 
             if (e.cancellationReasons() != null && !e.cancellationReasons().isEmpty()) {
-                // writeItems order: [mainTxn, categoryTotal, msgIndex1, msgIndex2...]
                 if ("ConditionalCheckFailed".equals(e.cancellationReasons().get(0).code())) {
                     mainTxnFailed = true;
                 }
@@ -274,12 +209,119 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 }
             }
 
-            if (messageIndexFailed) {
+            if (mainTxnFailed) {
+                handleExistingTransaction(txn, acctPk, txnSk);
+            } else if (messageIndexFailed) {
                 throw new IllegalStateException("Transaction failed: A message ID already exists and belongs to a different transaction.", e);
-            } else if (mainTxnFailed) {
-                System.out.println("Transaction already exists, skipping to maintain idempotency.");
             } else {
                 throw new IllegalStateException("Transaction failed due to unknown reasons: " + e.getMessage(), e);
+            }
+        }
+    }
+
+    private void handleExistingTransaction(NormalizedTxn txn, String acctPk, String txnSk) {
+        // The transaction already exists. We only need to add any NEW message IDs to it.
+        // We use TransactWriteItems to atomically update the sourceMessageIds and add new MSG# indices.
+        // We DO NOT update category totals.
+        
+        List<TransactWriteItem> writeItems = new ArrayList<>();
+        
+        // Add new message IDs to the existing transaction
+        writeItems.add(TransactWriteItem.builder()
+                .update(Update.builder()
+                        .tableName(tableName)
+                        .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
+                        .updateExpression("ADD sourceMessageIds :newIds")
+                        .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build()))
+                        .build())
+                .build());
+
+        // Attempt to create MSG# indices for ALL message IDs (only if they don't exist yet)
+        for (String msgId : txn.sourceMessageIds()) {
+            Map<String, AttributeValue> msgItem = new HashMap<>();
+            msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
+            msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+            msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
+            msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
+            writeItems.add(TransactWriteItem.builder()
+                    .put(Put.builder()
+                            .tableName(tableName)
+                            .item(msgItem)
+                            // We use a conditional put. If the MSG# already exists, we will catch the failure below.
+                            .conditionExpression("attribute_not_exists(PK)")
+                            .build())
+                    .build());
+        }
+
+        try {
+            client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
+        } catch (TransactionCanceledException e) {
+            // It's perfectly fine if some MSG# indices already exist (they belong to this very transaction!)
+            // However, TransactWriteItems will fail the entire transaction if ANY condition fails.
+            // If we hit a ConditionalCheckFailed on a MSG# index, it means the index already exists.
+            // Let's verify that the existing MSG# index actually points to THIS transaction.
+            
+            for (String msgId : txn.sourceMessageIds()) {
+                Optional<NormalizedTxn> existingTarget = byMessageId(msgId);
+                if (existingTarget.isPresent()) {
+                    String existingId = TxnIdentity.getId(existingTarget.get());
+                    String currentId = TxnIdentity.getId(txn);
+                    if (!existingId.equals(currentId)) {
+                        throw new IllegalStateException("Conflict: Message ID " + msgId + " belongs to a different transaction!");
+                    }
+                }
+            }
+            
+            // If all existing MSG# indices point to this transaction, then there is nothing left to do!
+            // The ADD sourceMessageIds was either already done or isn't needed.
+            // Wait, what if we needed to add a NEW message ID but an OLD message ID failed the conditional check?
+            // TransactWriteItems fails entirely. We must retry the update, filtering out existing MSG# indices.
+            retryPartialUpdate(txn, acctPk, txnSk);
+        }
+    }
+    
+    private void retryPartialUpdate(NormalizedTxn txn, String acctPk, String txnSk) {
+        List<TransactWriteItem> writeItems = new ArrayList<>();
+        List<String> newIdsToAdd = new ArrayList<>();
+        
+        for (String msgId : txn.sourceMessageIds()) {
+            Map<String, AttributeValue> key = Map.of(
+                "PK", AttributeValue.builder().s("MSG#" + msgId).build(),
+                "SK", AttributeValue.builder().s("MSG").build()
+            );
+            
+            GetItemResponse res = client.getItem(GetItemRequest.builder().tableName(tableName).key(key).build());
+            if (!res.hasItem()) {
+                newIdsToAdd.add(msgId);
+                
+                Map<String, AttributeValue> msgItem = new HashMap<>(key);
+                msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
+                msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
+                
+                writeItems.add(TransactWriteItem.builder()
+                        .put(Put.builder()
+                                .tableName(tableName)
+                                .item(msgItem)
+                                .conditionExpression("attribute_not_exists(PK)")
+                                .build())
+                        .build());
+            }
+        }
+        
+        if (!newIdsToAdd.isEmpty()) {
+            writeItems.add(TransactWriteItem.builder()
+                    .update(Update.builder()
+                            .tableName(tableName)
+                            .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
+                            .updateExpression("ADD sourceMessageIds :newIds")
+                            .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(newIdsToAdd).build()))
+                            .build())
+                    .build());
+                    
+            try {
+                client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
+            } catch (TransactionCanceledException e) {
+                throw new IllegalStateException("Failed to update transaction with new message IDs due to concurrent modification", e);
             }
         }
     }

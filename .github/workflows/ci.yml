@@ -18,11 +18,23 @@ jobs:
       - name: Start DynamoDB Local
         run: |
           docker compose up -d dynamodb-local
-          # Wait a few seconds for it to bind
-          sleep 5
+          echo "Waiting for DynamoDB to become available..."
+          for i in {1..10}; do
+            if aws dynamodb list-tables --endpoint-url http://localhost:8000 --region us-east-1 > /dev/null 2>&1; then
+              echo "DynamoDB is ready!"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "DynamoDB failed to start!"
+          exit 1
       
       - name: Run unit and integration tests
         run: ./gradlew clean test
         
       - name: compile and self-check
         run: ./verify.sh
+
+      - name: Stop DynamoDB Local
+        if: always()
+        run: docker compose down

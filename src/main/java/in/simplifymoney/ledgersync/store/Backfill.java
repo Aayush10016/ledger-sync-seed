@@ -1,21 +1,16 @@
 package in.simplifymoney.ledgersync.store;
 
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import in.simplifymoney.ledgersync.util.TxnIdentity;
 
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Moves everything already in the SQL store into the document store.
- *
- * NOT IMPLEMENTED - this is yours.
- *
- * Two things to know before you start:
- *  - the SQL store is not clean. It has been running without a uniqueness
- *    guarantee for a long time
- *  - this will be run more than once, including after a partial failure
  */
 public final class Backfill {
 
@@ -36,44 +31,80 @@ public final class Backfill {
 
         try {
             List<NormalizedTxn> allTxns = source.all();
-            java.util.Map<String, NormalizedTxn> deduplicatedTxns = new ConcurrentHashMap<>();
+            java.util.Map<String, NormalizedTxn> deduplicatedTxns = new java.util.LinkedHashMap<>();
 
-            // Deduplicate items to handle dirty SQL store and merge message IDs
-            allTxns.parallelStream().forEach(txn -> {
+            // Deduplicate items to handle dirty SQL store using TxnIdentity instead of arbitrary visible fields
+            for (NormalizedTxn txn : allTxns) {
                 long currentRead = read.incrementAndGet();
                 if (currentRead % 100 == 0) {
                     System.out.println("Backfill Read Progress: " + currentRead + " / " + allTxns.size());
                 }
 
-                String merchant = txn.merchant() == null ? "" : txn.merchant().trim().toLowerCase();
-                String deduplicationKey = txn.accountLast4() + "|" + txn.occurredAt().toEpochSecond() + "|" + txn.direction() + "|" + txn.amount() + "|" + merchant;
+                String deduplicationKey = TxnIdentity.getId(txn);
                 
                 deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                     skipped.incrementAndGet();
                     java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
                     mergedIds.addAll(incoming.sourceMessageIds());
+                    java.util.List<String> sorted = new java.util.ArrayList<>(mergedIds);
+                    java.util.Collections.sort(sorted);
                     return new NormalizedTxn(
                         existing.accountLast4(), existing.occurredAt(), existing.direction(),
                         existing.amount(), existing.category(), existing.merchant(),
-                        new java.util.ArrayList<>(mergedIds)
+                        sorted
                     );
                 });
-            });
+            }
 
-            // Parallelize network-bound insertion to maximize throughput
-            deduplicatedTxns.values().parallelStream().forEach(txn -> {
-                try {
-                    target.save(txn);
-                    written.incrementAndGet();
-                } catch (Exception e) {
-                    System.err.println("Failed to insert transaction - " + e.getMessage());
-                    failed.incrementAndGet();
-                }
-            });
+            // Bounded concurrency
+            ExecutorService executor = Executors.newFixedThreadPool(10);
+            
+            for (NormalizedTxn txn : deduplicatedTxns.values()) {
+                executor.submit(() -> {
+                    int attempts = 0;
+                    boolean success = false;
+                    Throwable lastException = null;
+                    
+                    while (attempts < 3 && !success) {
+                        attempts++;
+                        try {
+                            target.save(txn);
+                            written.incrementAndGet();
+                            success = true;
+                        } catch (Exception e) {
+                            lastException = e;
+                            boolean retryable = isRetryable(e);
+                            if (!retryable) {
+                                break;
+                            }
+                            try {
+                                Thread.sleep(200L * attempts); // Simple backoff
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (!success) {
+                        failed.incrementAndGet();
+                        System.err.println("Failed to insert transaction " + TxnIdentity.getId(txn) + 
+                            " after " + attempts + " attempts. Exception: " + lastException.getClass().getSimpleName() + 
+                            " - " + lastException.getMessage() + ". Retryable: " + isRetryable(lastException));
+                    }
+                });
+            }
+
+            executor.shutdown();
+            if (!executor.awaitTermination(30, TimeUnit.MINUTES)) {
+                System.err.println("Backfill executor timed out.");
+            }
 
             System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
                     + ", Skipped: " + skipped.get() + ", Failed: " + failed.get());
+                    
             if (failed.get() > 0) {
+                System.err.println("Note: " + failed.get() + " records failed. Checkpointing is not implemented. A re-run will process all items and skip already written ones idempotently.");
                 throw new IllegalStateException("Backfill completed with " + failed.get() + " failures. Check logs for details.");
             }
             return new Result(read.get(), written.get(), skipped.get(), failed.get());
@@ -81,6 +112,21 @@ public final class Backfill {
             e.printStackTrace();
             throw new RuntimeException("Backfill failed critically", e);
         }
+    }
+
+    private boolean isRetryable(Throwable e) {
+        if (e == null) return false;
+        String name = e.getClass().getSimpleName();
+        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+        if (name.contains("ProvisionedThroughputExceededException") ||
+            name.contains("InternalServerError") ||
+            name.contains("ThrottlingException") ||
+            name.contains("RequestLimitExceeded") ||
+            msg.contains("rate limit") || msg.contains("throughput") ||
+            msg.contains("timeout")) {
+            return true;
+        }
+        return isRetryable(e.getCause());
     }
 
     public record Result(long read, long written, long skipped, long failed) {}
