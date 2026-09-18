@@ -1,9 +1,9 @@
 package in.simplifymoney.ledgersync;
 
 import in.simplifymoney.ledgersync.ingest.IngestService;
-import in.simplifymoney.ledgersync.model.Discrepancy;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.parse.Parsers;
+import in.simplifymoney.ledgersync.store.Backfill;
 import in.simplifymoney.ledgersync.store.ConsistencyChecker;
 import in.simplifymoney.ledgersync.store.DynamoDbLedgerStore;
 import in.simplifymoney.ledgersync.store.SqlLedgerStore;
@@ -13,8 +13,8 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -44,19 +44,9 @@ public class EndToEndTest {
             // Note: We use a try-catch for DynamoDB setup to allow the test to gracefully
             // handle environments without Docker, while still running natively on CI.
             DynamoDbLedgerStore dynamo = null;
-            in.simplifymoney.ledgersync.store.LedgerStore dynamoAdapter = null;
             boolean dynamoReady = false;
             try {
                 dynamo = new DynamoDbLedgerStore(client);
-                final DynamoDbLedgerStore finalDynamo = dynamo;
-                dynamoAdapter = new in.simplifymoney.ledgersync.store.LedgerStore() {
-                    @Override public void save(NormalizedTxn txn) { finalDynamo.save(txn); }
-                    @Override public List<NormalizedTxn> all() { return Collections.emptyList(); }
-                    @Override public long count() { return 0; }
-                    @Override public List<Discrepancy> discrepancies() { return Collections.emptyList(); }
-                    @Override public void save(Discrepancy d) {}
-                };
-                
                 // Initialize Table
                 System.out.println("Initializing DynamoDB tables...");
                 dynamoReady = true;
@@ -71,28 +61,12 @@ public class EndToEndTest {
             long sqlSubTotalAfterA = getSqlTotal(sql, "4821", "INCOME");
             System.out.println("SQL INCOME total for 4821 after A: " + sqlSubTotalAfterA);
 
-            if (dynamoReady) {
-                System.out.println("Ingesting Corpus A into DynamoDB...");
-                var aDyn = new IngestService(new Parsers(), dynamoAdapter).ingestFile(Path.of("fixtures", "corpus-a.jsonl"));
-                System.out.println("DynamoDB: " + aDyn);
-            }
-
             System.out.println("\nIngesting Corpus B into SQL...");
             var bSql = new IngestService(new Parsers(), sql).ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
             System.out.println("SQL: " + bSql);
             
             long sqlSubTotalAfterB = getSqlTotal(sql, "4821", "INCOME");
             System.out.println("SQL INCOME total for 4821 after B: " + sqlSubTotalAfterB);
-
-            if (dynamoReady) {
-                System.out.println("Ingesting Corpus B into DynamoDB...");
-                var bDyn = new IngestService(new Parsers(), dynamoAdapter).ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
-                System.out.println("DynamoDB: " + bDyn);
-                
-                System.out.println("\nIngesting Corpus B into DynamoDB a SECOND TIME (Idempotency Check)...");
-                var bDyn2 = new IngestService(new Parsers(), dynamoAdapter).ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
-                System.out.println("DynamoDB (2nd run): " + bDyn2);
-            }
 
             System.out.println("\nIngesting Corpus B into SQL a SECOND TIME (Idempotency Check)...");
             var bSql2 = new IngestService(new Parsers(), sql).ingestFile(Path.of("fixtures", "corpus-b.jsonl"));
@@ -114,6 +88,10 @@ public class EndToEndTest {
             assertEquals(3, txn.sourceMessageIds().size(), "There should be 3 message IDs due to deduplication");
 
             if (dynamoReady) {
+                System.out.println("\nBackfilling SQL into DynamoDB before full consistency check...");
+                var backfillResult = new Backfill(sql, dynamo).run(2, TimeUnit.MINUTES);
+                System.out.println("Backfill: " + backfillResult);
+
                 System.out.println("\nChecking consistency...");
                 var divergences = new ConsistencyChecker(sql, dynamo).check();
                 for (var d : divergences) {
