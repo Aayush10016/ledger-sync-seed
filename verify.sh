@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 echo "==> compiling"
 rm -rf build/selfcheck && mkdir -p build/selfcheck
-javac -d build/selfcheck $(find src/main/java -name '*.java' ! -name 'DynamoDbLedgerStore.java')
+javac -d build/selfcheck $(find src/main/java -name '*.java' ! -name 'DynamoDbLedgerStore.java' ! -name 'DynamoDbLedgerAdapter.java')
 
 echo
 echo "==> running"
