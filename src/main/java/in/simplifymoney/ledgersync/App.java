@@ -54,7 +54,7 @@ public final class App {
                     Files.writeString(out.resolve("ledger.json"),
                             Json.writePretty(Reports.ledgerDocument(ledger)));
                     Files.writeString(out.resolve("summary.json"),
-                            Json.writePretty(Reports.summary(ledger)));
+                        Json.writePretty(Reports.summary(ledger, discrepancies)));
                     Files.writeString(out.resolve("reconciliation.json"),
                             Json.writePretty(Reports.reconciliation(discrepancies)));
                     System.out.println("wrote 3 files to " + out);

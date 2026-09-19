@@ -27,7 +27,7 @@ public final class Reports {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO.setScale(2);
 
-    public static Map<String, Object> summary(List<NormalizedTxn> ledger) {
+    public static Map<String, Object> summary(List<NormalizedTxn> ledger, List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies) {
         Map<String, Object> accounts = new LinkedHashMap<>();
         for (String acct : new TreeSet<>(ledger.stream()
                 .map(NormalizedTxn::accountLast4).toList())) {
@@ -50,6 +50,16 @@ public final class Reports {
                 } else if (t.category() == Category.TRANSFER) {
                     if (t.direction() == Direction.DEBIT) transferred_out = transferred_out.add(t.amount());
                     else transferred_in = transferred_in.add(t.amount());
+                }
+            }
+
+            for (in.simplifymoney.ledgersync.model.Discrepancy d : discrepancies) {
+                if (!d.accountLast4().equals(acct)) continue;
+                
+                if (d.amount().compareTo(BigDecimal.ZERO) < 0) {
+                    spend = spend.add(d.amount().negate());
+                } else {
+                    income = income.add(d.amount());
                 }
             }
 
