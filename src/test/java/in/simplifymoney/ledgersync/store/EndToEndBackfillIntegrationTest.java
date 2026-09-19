@@ -119,9 +119,9 @@ public class EndToEndBackfillIntegrationTest {
         Backfill backfill = new Backfill(sqlStore, dynamoStore);
         Backfill.Result result = backfill.run(1, TimeUnit.MINUTES);
 
-        assertEquals(3, result.read(), "Should read 3 from SQL");
+        assertEquals(2, result.read(), "SQL should already merge the duplicate bank-reference row");
         assertEquals(2, result.written(), "Should write 2 unique to Dynamo");
-        assertEquals(1, result.sourceDeduplicated(), "Should deduplicate 1");
+        assertEquals(0, result.sourceDeduplicated(), "Backfill should receive canonical SQL rows");
         assertEquals(0, result.targetSkipped(), "Should skip 0 from target");
         assertEquals(0, result.failed());
 
@@ -129,15 +129,7 @@ public class EndToEndBackfillIntegrationTest {
         ConsistencyChecker checker = new ConsistencyChecker(sqlStore, dynamoStore);
         List<ConsistencyChecker.Divergence> divergences = checker.check();
         
-        // Divergences will include 1 SQL_DUPLICATE_IDENTITY, because SQL has duplicates but DynamoDB shouldn't!
-        // Wait, does ConsistencyChecker expect SQL duplicates to exist in DynamoDB?
-        // Let's print out what we get and assert what is expected.
-        long duplicateDivergences = divergences.stream()
-            .filter(d -> d.what().startsWith("SQL_DUPLICATE_IDENTITY"))
-            .count();
-            
-        assertEquals(1, duplicateDivergences, "Expect exactly 1 SQL_DUPLICATE_IDENTITY divergence");
-        assertEquals(1, divergences.size(), "Should have exactly 1 divergence total (the duplicate in SQL)");
+        assertEquals(List.of(), divergences, "Canonical SQL rows and DynamoDB rows should match exactly");
     }
 
     private static Path schemaOnlyMigrations() throws Exception {

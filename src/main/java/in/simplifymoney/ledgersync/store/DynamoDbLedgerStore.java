@@ -55,6 +55,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
         QueryRequest.Builder builder = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
+                .consistentRead(true)
                 .expressionAttributeValues(Map.of(
                         ":pk", AttributeValue.builder().s(pk).build(),
                         ":sk", AttributeValue.builder().s(skPrefix).build()
@@ -85,6 +86,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
         QueryRequest.Builder builder = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
+                .consistentRead(true)
                 .expressionAttributeValues(Map.of(
                         ":pk", AttributeValue.builder().s(pk).build(),
                         ":sk", AttributeValue.builder().s(skPrefix).build()
@@ -115,6 +117,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
         QueryRequest req = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
+                .consistentRead(true)
                 .expressionAttributeValues(Map.of(
                         ":pk", AttributeValue.builder().s(pk).build(),
                         ":sk", AttributeValue.builder().s(skPrefix).build()
@@ -157,6 +160,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
 
         GetItemRequest req = GetItemRequest.builder()
                 .tableName(tableName)
+                .consistentRead(true)
                 .key(Map.of(
                         "PK", AttributeValue.builder().s(pk).build(),
                         "SK", AttributeValue.builder().s(sk).build()
@@ -170,6 +174,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
             if (item.containsKey("targetPk") && item.containsKey("targetSk")) {
                 GetItemResponse targetRes = client.getItem(GetItemRequest.builder()
                         .tableName(tableName)
+                        .consistentRead(true)
                         .key(Map.of("PK", item.get("targetPk"), "SK", item.get("targetSk")))
                         .build());
                 if (targetRes.hasItem()) {
@@ -187,6 +192,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public List<NormalizedTxn> scanAllTransactions() {
         ScanRequest.Builder builder = ScanRequest.builder()
                 .tableName(tableName)
+                .consistentRead(true)
                 .filterExpression("begins_with(SK, :sk)")
                 .expressionAttributeValues(Map.of(
                         ":sk", AttributeValue.builder().s("TXN#").build()
@@ -428,6 +434,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
         for (String msgId : sourceMessageIds) {
             GetItemResponse res = client.getItem(GetItemRequest.builder()
                     .tableName(tableName)
+                    .consistentRead(true)
                     .key(Map.of(
                             "PK", AttributeValue.builder().s("MSG#" + msgId).build(),
                             "SK", AttributeValue.builder().s("MSG").build()
@@ -472,6 +479,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
     private Optional<NormalizedTxn> transactionAt(String pk, String sk) {
         GetItemResponse res = client.getItem(GetItemRequest.builder()
                 .tableName(tableName)
+                .consistentRead(true)
                 .key(Map.of(
                         "PK", AttributeValue.builder().s(pk).build(),
                         "SK", AttributeValue.builder().s(sk).build()
@@ -493,7 +501,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 "SK", AttributeValue.builder().s("MSG").build()
             );
 
-            GetItemResponse res = client.getItem(GetItemRequest.builder().tableName(tableName).key(key).build());
+            GetItemResponse res = client.getItem(GetItemRequest.builder().tableName(tableName).consistentRead(true).key(key).build());
             if (!res.hasItem()) {
                 newIdsToAdd.add(msgId);
 

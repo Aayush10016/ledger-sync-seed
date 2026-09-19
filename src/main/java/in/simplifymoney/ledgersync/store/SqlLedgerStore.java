@@ -146,27 +146,26 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     private void saveInternal(Connection conn, NormalizedTxn t) throws SQLException {
         String txnId = findTxnIdByAnySource(conn, t.sourceMessageIds());
-        NormalizedTxn toSave = t;
-
         if (txnId == null) {
             txnId = in.simplifymoney.ledgersync.util.TxnIdentity.getId(t);
-        } else {
-            NormalizedTxn existing = loadByTxnId(conn, txnId);
-            if (existing != null) {
-                validateCompatibleIdentity(existing, t);
-                java.util.Set<String> mergedIds = new java.util.TreeSet<>(existing.sourceMessageIds());
-                mergedIds.addAll(t.sourceMessageIds());
-                String bankRef = mergeBankReference(existing.bankReferenceId(), t.bankReferenceId());
-                toSave = new NormalizedTxn(
-                        t.accountLast4(),
-                        t.occurredAt(),
-                        t.direction(),
-                        t.amount(),
-                        t.category(),
-                        t.merchant(),
-                        new java.util.ArrayList<>(mergedIds),
-                        bankRef);
-            }
+        }
+        NormalizedTxn toSave = t;
+        NormalizedTxn existing = loadByTxnId(conn, txnId);
+
+        if (existing != null) {
+            validateCompatibleIdentity(existing, t);
+            java.util.Set<String> mergedIds = new java.util.TreeSet<>(existing.sourceMessageIds());
+            mergedIds.addAll(t.sourceMessageIds());
+            String bankRef = mergeBankReference(existing.bankReferenceId(), t.bankReferenceId());
+            toSave = new NormalizedTxn(
+                    t.accountLast4(),
+                    t.occurredAt(),
+                    t.direction(),
+                    t.amount(),
+                    t.category(),
+                    t.merchant(),
+                    new java.util.ArrayList<>(mergedIds),
+                    bankRef);
         }
 
         try (PreparedStatement ps = conn.prepareStatement(
