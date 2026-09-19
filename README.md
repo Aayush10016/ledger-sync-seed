@@ -3,7 +3,7 @@
 Scaffolding for the Simplify Money **Software Engineering Intern (Backend, Java)** take-home.
 
 Read this file completely before you write any code. Then read
-`fixtures/corpus-a.jsonl` — not all 500 lines, but enough of them that you stop
+`fixtures/corpus-a.jsonl` — 522 lines, enough of them that you stop
 being surprised.
 
 > **Do not open a pull request here.** Work in your own fork and submit by email.
@@ -223,20 +223,27 @@ write fails, and prints the real DynamoDB `ScannedCount`/`Count` values for the
 two Query access patterns. DynamoDB `GetItem` does not expose those counters,
 so the message lookup metric reports the deterministic point-read call count.
 
-| Benchmark | Expected (Examined / Returned) | Measured (Examined / Returned) |
-| --- | --- | --- |
-| **Q1** (`forAccountMonth`) | `100000` / `100000` | `100000` / `100000` |
-| **Q2** (`categoryTotals`) | `4` / `4` | `1` / `1` |
-| **Q3** (`byMessageId`) | `1` / `1` | `1` / `1` |
+| Query | Measured examined / returned |
+| --- | --- |
+| Q1: `forAccountMonth` | `100000` / `100000` |
+| Q2: `categoryTotals` | `1` / `1` |
+| Q3: `byMessageId` | `1` point-read operation |
 
 #### Q1: `forAccountMonth(accountLast4, month)`
 - *Why:* The query directly targets the partition key (`ACCT#1234`) and uses a range key `begins_with(SK, TXN#YYYY-MM)`. It reads exactly what it returns, scanning no irrelevant documents.
 
 #### Q2: `categoryTotals(accountLast4)`
-- *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys. (Measured is 1/1 because the benchmark dataset contains only SPEND records).
+- *Why:* Instead of scanning all transactions, we maintain a running total using DynamoDB atomic `ADD` updates. The query fetches strictly from `CAT#` range keys. The measured benchmark returns one category row because the benchmark dataset contains only SPEND records; four category rows is the design maximum, not the measured result.
 
 #### Q3: `byMessageId(messageId)`
-- *Why:* DynamoDB's `GetItem` API does not return `ScannedCount` or `Count` because it is an explicit O(1) Hash Map lookup. The engine mathematically examines exactly **1 item** and returns **1 item** (or 0 if not found), independent of the 100,000 records in the table.
+- *Why:* DynamoDB's `GetItem` API does not expose `ScannedCount` or `Count` because it is an explicit O(1) point lookup. The metric is therefore reported as one point-read operation rather than fabricated examined/returned counters.
+
+### Database migrations
+
+This project does not use Flyway. SQL migrations are applied by the custom
+SqlLedgerStore migration mechanism and tracked in the schema_history table.
+Migration filenames use the V<number>__description.sql convention, and
+migration versions are validated by MigrationVersionTest.
 
 ### Decision Log
 
