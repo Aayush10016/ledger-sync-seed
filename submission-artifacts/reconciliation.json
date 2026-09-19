@@ -1,0 +1,10 @@
+{
+  "discrepancies": [
+    {
+      "account_last4": "4821",
+      "occurred_at": "2026-07-29T17:06+05:30",
+      "amount": "-7500.00",
+      "note": "type=balance-gap; sources=m-00204-4741e7,m-00425-9dea9d; ledger computed 35979.05 but bank reported 28479.05"
+    }
+  ]
+}
