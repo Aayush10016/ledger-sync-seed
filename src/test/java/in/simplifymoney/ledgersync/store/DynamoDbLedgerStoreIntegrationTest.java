@@ -441,11 +441,11 @@ public class DynamoDbLedgerStoreIntegrationTest {
 
         // Recovery rebuilds category totals after atomically recreating the transaction and pointers,
         // so the old orphaned 15.00 total must not remain.
-        assertEquals(new BigDecimal("99.00"), store.categoryTotals("9999").get(Category.SPEND));
+        assertEquals(0, new BigDecimal("99.00").compareTo(store.categoryTotals("9999").get(Category.SPEND)));
         
         // An explicit rebuild remains idempotent.
         store.rebuildCategoryTotals("9999");
-        assertEquals(new BigDecimal("99.00"), store.categoryTotals("9999").get(Category.SPEND));
+        assertEquals(0, new BigDecimal("99.00").compareTo(store.categoryTotals("9999").get(Category.SPEND)));
     }
 
     @Test
