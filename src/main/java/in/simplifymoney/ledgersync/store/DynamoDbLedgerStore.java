@@ -111,7 +111,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
     public void rebuildCategoryTotals(String accountLast4) {
         String pk = "ACCT#" + accountLast4;
         String skPrefix = "TXN#";
-        
+
         QueryRequest req = QueryRequest.builder()
                 .tableName(tableName)
                 .keyConditionExpression("PK = :pk AND begins_with(SK, :sk)")
@@ -120,7 +120,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                         ":sk", AttributeValue.builder().s(skPrefix).build()
                 ))
                 .build();
-                
+
         List<NormalizedTxn> txns = new ArrayList<>();
         QueryResponse res;
         do {
@@ -130,12 +130,12 @@ public class DynamoDbLedgerStore implements DocumentStore {
             }
             req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
         } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
-        
+
         Map<Category, BigDecimal> newTotals = new HashMap<>();
         for (NormalizedTxn txn : txns) {
             newTotals.merge(txn.category(), txn.amount(), BigDecimal::add);
         }
-        
+
         for (Category cat : Category.values()) {
             BigDecimal amt = newTotals.getOrDefault(cat, BigDecimal.ZERO);
             String sk = "CAT#" + cat.name();
@@ -205,7 +205,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
             }
             req = req.toBuilder().exclusiveStartKey(res.lastEvaluatedKey()).build();
         } while (res.lastEvaluatedKey() != null && !res.lastEvaluatedKey().isEmpty());
-        
+
         return out;
     }
 
@@ -219,7 +219,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
             handleExistingTransaction(txn, existingPointer.targetPk(), existingPointer.targetSk());
             return;
         }
-        
+
         // New transaction path. Existing source-message IDs are handled above,
         // retaining the already assigned document key.
         String txnId = TxnIdentity.getId(txn);
@@ -236,12 +236,15 @@ public class DynamoDbLedgerStore implements DocumentStore {
         if (txn.merchant() != null) {
             item.put("merchant", AttributeValue.builder().s(txn.merchant()).build());
         }
+        if (txn.bankReferenceId() != null) {
+            item.put("bankReferenceId", AttributeValue.builder().s(txn.bankReferenceId()).build());
+        }
         if (!txn.sourceMessageIds().isEmpty()) {
             item.put("sourceMessageIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build());
         }
 
         List<TransactWriteItem> writeItems = new ArrayList<>();
-        
+
         // 1. Put Main Transaction (fail if exists)
         writeItems.add(TransactWriteItem.builder()
                 .put(Put.builder()
@@ -303,14 +306,49 @@ public class DynamoDbLedgerStore implements DocumentStore {
         Optional<NormalizedTxn> existing = transactionAt(acctPk, txnSk);
         if (existing.isEmpty()) {
             // Dangling pointer recovery
+            // We recreate the missing TXN# and forcibly recreate all MSG# pointers pointing to it.
+            // We omit the CAT# update to prevent double counting if it was already updated,
+            // and instead rely on a full category rebuild immediately after.
+            String month = txn.occurredAt().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+            String newTxnSk = "TXN#" + month + "#" + txn.occurredAt().toEpochSecond() + "#" + TxnIdentity.getId(txn);
+
+            List<TransactWriteItem> recoveryItems = new ArrayList<>();
+
+            Map<String, AttributeValue> item = new HashMap<>();
+            item.put("PK", AttributeValue.builder().s(acctPk).build());
+            item.put("SK", AttributeValue.builder().s(newTxnSk).build());
+            item.put("accountLast4", AttributeValue.builder().s(txn.accountLast4()).build());
+            item.put("occurredAt", AttributeValue.builder().s(txn.occurredAt().toString()).build());
+            item.put("direction", AttributeValue.builder().s(txn.direction().name()).build());
+            item.put("amount", AttributeValue.builder().s(txn.amount().toPlainString()).build());
+            item.put("category", AttributeValue.builder().s(txn.category().name()).build());
+            if (txn.merchant() != null) {
+                item.put("merchant", AttributeValue.builder().s(txn.merchant()).build());
+            }
+            if (txn.bankReferenceId() != null) {
+                item.put("bankReferenceId", AttributeValue.builder().s(txn.bankReferenceId()).build());
+            }
+            if (!txn.sourceMessageIds().isEmpty()) {
+                item.put("sourceMessageIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build());
+            }
+
+            recoveryItems.add(TransactWriteItem.builder()
+                    .put(Put.builder().tableName(tableName).item(item).build())
+                    .build());
+
             for (String msgId : txn.sourceMessageIds()) {
-                client.deleteItem(software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest.builder()
-                        .tableName(tableName)
-                        .key(Map.of("PK", AttributeValue.builder().s("MSG#" + msgId).build(),
-                                    "SK", AttributeValue.builder().s("MSG").build()))
+                Map<String, AttributeValue> msgItem = new HashMap<>();
+                msgItem.put("PK", AttributeValue.builder().s("MSG#" + msgId).build());
+                msgItem.put("SK", AttributeValue.builder().s("MSG").build());
+                msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
+                msgItem.put("targetSk", AttributeValue.builder().s(newTxnSk).build());
+                recoveryItems.add(TransactWriteItem.builder()
+                        .put(Put.builder().tableName(tableName).item(msgItem).build())
                         .build());
             }
-            save(txn);
+
+            client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(recoveryItems).build());
+            rebuildCategoryTotals(txn.accountLast4());
             return;
         }
         if (!isCompatible(existing.get(), txn)) {
@@ -320,17 +358,26 @@ public class DynamoDbLedgerStore implements DocumentStore {
         // The transaction already exists. We only need to add any NEW message IDs to it.
         // We use TransactWriteItems to atomically update the sourceMessageIds and add new MSG# indices.
         // We DO NOT update category totals.
-        
+
         List<TransactWriteItem> writeItems = new ArrayList<>();
-        
+
         // Add new message IDs to the existing transaction
+        Map<String, AttributeValue> updateValues = new HashMap<>();
+        updateValues.put(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build());
+        String updateExpression = "ADD sourceMessageIds :newIds";
+        String conditionExpression = "attribute_exists(PK)";
+        if (txn.bankReferenceId() != null && existing.get().bankReferenceId() == null) {
+            updateExpression = "SET bankReferenceId = :bankRef ADD sourceMessageIds :newIds";
+            conditionExpression = "attribute_exists(PK) AND (attribute_not_exists(bankReferenceId) OR bankReferenceId = :bankRef)";
+            updateValues.put(":bankRef", AttributeValue.builder().s(txn.bankReferenceId()).build());
+        }
         writeItems.add(TransactWriteItem.builder()
                 .update(Update.builder()
                         .tableName(tableName)
                         .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
-                        .updateExpression("ADD sourceMessageIds :newIds")
-                        .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(txn.sourceMessageIds()).build()))
-                        .conditionExpression("attribute_exists(PK)")
+                        .updateExpression(updateExpression)
+                        .expressionAttributeValues(updateValues)
+                        .conditionExpression(conditionExpression)
                         .build())
                 .build());
 
@@ -358,7 +405,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
             // However, TransactWriteItems will fail the entire transaction if ANY condition fails.
             // If we hit a ConditionalCheckFailed on a MSG# index, it means the index already exists.
             // Let's verify that the existing MSG# index actually points to THIS transaction.
-            
+
             for (String msgId : txn.sourceMessageIds()) {
                 Optional<NormalizedTxn> existingTarget = byMessageId(msgId);
                 if (existingTarget.isPresent()) {
@@ -367,7 +414,7 @@ public class DynamoDbLedgerStore implements DocumentStore {
                     }
                 }
             }
-            
+
             // If all existing MSG# indices point to this transaction, then there is nothing left to do!
             // The ADD sourceMessageIds was either already done or isn't needed.
             // Wait, what if we needed to add a NEW message ID but an OLD message ID failed the conditional check?
@@ -405,11 +452,17 @@ public class DynamoDbLedgerStore implements DocumentStore {
         // differently, so including it would cause false conflicts on cross-channel merges.
         // Category IS included because two different category assignments for the same source
         // message represent a genuine data conflict that must be rejected.
+        boolean bankRefMatch = true;
+        if (existing.bankReferenceId() != null && incoming.bankReferenceId() != null) {
+            bankRefMatch = existing.bankReferenceId().equals(incoming.bankReferenceId());
+        }
+
         return existing.accountLast4().equals(incoming.accountLast4())
                 && existing.occurredAt().toEpochSecond() == incoming.occurredAt().toEpochSecond()
                 && existing.direction() == incoming.direction()
                 && existing.amount().compareTo(incoming.amount()) == 0
-                && existing.category() == incoming.category();
+                && existing.category() == incoming.category()
+                && bankRefMatch;
     }
 
     private boolean transactionExists(String pk, String sk) {
@@ -429,25 +482,25 @@ public class DynamoDbLedgerStore implements DocumentStore {
         }
         return Optional.of(deserialize(res.item()));
     }
-    
+
     private void retryPartialUpdate(NormalizedTxn txn, String acctPk, String txnSk) {
         List<TransactWriteItem> writeItems = new ArrayList<>();
         List<String> newIdsToAdd = new ArrayList<>();
-        
+
         for (String msgId : txn.sourceMessageIds()) {
             Map<String, AttributeValue> key = Map.of(
                 "PK", AttributeValue.builder().s("MSG#" + msgId).build(),
                 "SK", AttributeValue.builder().s("MSG").build()
             );
-            
+
             GetItemResponse res = client.getItem(GetItemRequest.builder().tableName(tableName).key(key).build());
             if (!res.hasItem()) {
                 newIdsToAdd.add(msgId);
-                
+
                 Map<String, AttributeValue> msgItem = new HashMap<>(key);
                 msgItem.put("targetPk", AttributeValue.builder().s(acctPk).build());
                 msgItem.put("targetSk", AttributeValue.builder().s(txnSk).build());
-                
+
                 writeItems.add(TransactWriteItem.builder()
                         .put(Put.builder()
                                 .tableName(tableName)
@@ -457,18 +510,30 @@ public class DynamoDbLedgerStore implements DocumentStore {
                         .build());
             }
         }
-        
+
         if (!newIdsToAdd.isEmpty()) {
+            Optional<NormalizedTxn> existing = transactionAt(acctPk, txnSk);
+            Map<String, AttributeValue> updateValues = new HashMap<>();
+            updateValues.put(":newIds", AttributeValue.builder().ss(newIdsToAdd).build());
+            String updateExpression = "ADD sourceMessageIds :newIds";
+            String conditionExpression = "attribute_exists(PK)";
+            if (txn.bankReferenceId() != null
+                    && existing.isPresent()
+                    && existing.get().bankReferenceId() == null) {
+                updateExpression = "SET bankReferenceId = :bankRef ADD sourceMessageIds :newIds";
+                conditionExpression = "attribute_exists(PK) AND (attribute_not_exists(bankReferenceId) OR bankReferenceId = :bankRef)";
+                updateValues.put(":bankRef", AttributeValue.builder().s(txn.bankReferenceId()).build());
+            }
             writeItems.add(TransactWriteItem.builder()
                     .update(Update.builder()
                             .tableName(tableName)
                             .key(Map.of("PK", AttributeValue.builder().s(acctPk).build(), "SK", AttributeValue.builder().s(txnSk).build()))
-                            .updateExpression("ADD sourceMessageIds :newIds")
-                            .expressionAttributeValues(Map.of(":newIds", AttributeValue.builder().ss(newIdsToAdd).build()))
-                            .conditionExpression("attribute_exists(PK)")
+                            .updateExpression(updateExpression)
+                            .expressionAttributeValues(updateValues)
+                            .conditionExpression(conditionExpression)
                             .build())
                     .build());
-                    
+
             try {
                 client.transactWriteItems(TransactWriteItemsRequest.builder().transactItems(writeItems).build());
             } catch (TransactionCanceledException e) {
@@ -489,12 +554,15 @@ public class DynamoDbLedgerStore implements DocumentStore {
             if (!isCompatible(existingTarget.get(), txn)) {
                 throw new IllegalStateException("Conflict: Message ID " + msgId + " belongs to a different transaction!");
             }
+            if (!existingTarget.get().sourceMessageIds().contains(msgId)) {
+                return false;
+            }
         }
         return true;
     }
 
     private NormalizedTxn deserialize(Map<String, AttributeValue> item) {
-        List<String> sortedIds = item.containsKey("sourceMessageIds") 
+        List<String> sortedIds = item.containsKey("sourceMessageIds")
             ? new ArrayList<>(item.get("sourceMessageIds").ss())
             : new ArrayList<>();
         Collections.sort(sortedIds);
@@ -506,7 +574,8 @@ public class DynamoDbLedgerStore implements DocumentStore {
                 new BigDecimal(item.get("amount").s()),
                 in.simplifymoney.ledgersync.model.Category.valueOf(item.get("category").s()),
                 item.containsKey("merchant") ? item.get("merchant").s() : null,
-                sortedIds
+                sortedIds,
+                item.containsKey("bankReferenceId") ? item.get("bankReferenceId").s() : null
         );
     }
 

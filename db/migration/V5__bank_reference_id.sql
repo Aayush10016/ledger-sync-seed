@@ -1,0 +1,1 @@
+ALTER TABLE ledger ADD COLUMN IF NOT EXISTS bank_reference_id VARCHAR(200);

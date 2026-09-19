@@ -13,6 +13,12 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Moves everything already in the SQL store into the document store.
+ *
+ * Note on Checkpointing:
+ * This process intentionally leverages idempotent reprocessing instead of maintaining
+ * a discrete persistence checkpoint file. If the backfill is interrupted, rerunning
+ * it will read the complete source SQL store again. It safely and idempotently skips
+ * already-inserted items using precise target verification checks.
  */
 public final class Backfill {
 
@@ -52,7 +58,7 @@ public final class Backfill {
                 }
 
                 String deduplicationKey = TxnIdentity.getId(txn);
-                
+
                 deduplicatedTxns.merge(deduplicationKey, txn, (existing, incoming) -> {
                     sourceDeduplicated.incrementAndGet();
                     java.util.Set<String> mergedIds = new java.util.HashSet<>(existing.sourceMessageIds());
@@ -78,20 +84,30 @@ public final class Backfill {
             // Bounded concurrency
             ExecutorService executor = Executors.newFixedThreadPool(10);
             List<Future<?>> futures = new java.util.ArrayList<>();
-            
+
             for (NormalizedTxn txn : deduplicatedTxns.values()) {
                 String deduplicationKey = TxnIdentity.getId(txn);
                 futures.add(executor.submit(() -> {
                     int attempts = 0;
                     boolean success = false;
                     Throwable lastException = null;
-                    
+
                     while (attempts < 3 && !success) {
                         attempts++;
                         try {
-                            // Safe Resume Support: Skip if it already exists
-                            java.util.Optional<NormalizedTxn> existingTarget = target.byMessageId(txn.sourceMessageIds().get(0));
-                            if (existingTarget.isPresent() && TxnIdentity.getId(existingTarget.get()).equals(deduplicationKey)) {
+                            // Safe Resume Support: Verify the transaction exists and has ALL source message IDs
+                            boolean completelyExists = true;
+                            for (String msgId : txn.sourceMessageIds()) {
+                                java.util.Optional<NormalizedTxn> existingTarget = target.byMessageId(msgId);
+                                if (existingTarget.isEmpty()
+                                        || !TxnIdentity.getId(existingTarget.get()).equals(deduplicationKey)
+                                        || !existingTarget.get().sourceMessageIds().contains(msgId)) {
+                                    completelyExists = false;
+                                    break;
+                                }
+                            }
+
+                            if (completelyExists) {
                                 targetSkipped.incrementAndGet();
                                 success = true; // Pretend it succeeded
                             } else {
@@ -112,7 +128,7 @@ public final class Backfill {
                             }
                         }
                     }
-                    
+
                     if (!success) {
                         failed.incrementAndGet();
                         String exName = lastException != null ? lastException.getClass().getSimpleName() : "Unknown";
@@ -123,14 +139,11 @@ public final class Backfill {
                                 YearMonth.from(txn.occurredAt()).toString(),
                                 TxnIdentity.getId(txn),
                                 attempts,
-                                1,
-                                1,
                                 failureType,
                                 exName,
-                                exMsg,
-                                false));
-                        System.err.println("Failed to insert transaction " + TxnIdentity.getId(txn) + 
-                            " after " + attempts + " attempts. Exception: " + exName + 
+                                exMsg));
+                        System.err.println("Failed to insert transaction " + TxnIdentity.getId(txn) +
+                            " after " + attempts + " attempts. Exception: " + exName +
                             " - " + exMsg + ". FailureType: " + failureType);
                     }
                 }));
@@ -162,9 +175,9 @@ public final class Backfill {
                 }
             }
 
-            System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get() 
+            System.out.println("Backfill complete. Read: " + read.get() + ", Written: " + written.get()
                     + ", Source Deduplicated: " + sourceDeduplicated.get() + ", Target Skipped: " + targetSkipped.get() + ", Failed: " + failed.get());
-                    
+
             if (failed.get() > 0) {
                 status = Status.FAILED;
                 System.err.println("Note: " + failed.get() + " records failed. Checkpointing is not implemented. A re-run will process all items and skip already written ones idempotently.");
@@ -189,23 +202,58 @@ public final class Backfill {
 
     private FailureType classify(Throwable e) {
         if (e == null) return FailureType.NON_RETRYABLE;
-        
-        if (e instanceof software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException ||
-            e instanceof software.amazon.awssdk.services.dynamodb.model.RequestLimitExceededException ||
-            e instanceof software.amazon.awssdk.services.dynamodb.model.InternalServerErrorException) {
-            return FailureType.RETRYABLE;
-        }
-        
-        if (e instanceof software.amazon.awssdk.core.exception.ApiCallTimeoutException ||
-            e instanceof software.amazon.awssdk.core.exception.ApiCallAttemptTimeoutException ||
-            e instanceof software.amazon.awssdk.core.exception.RetryableException) {
+
+        String className = e.getClass().getName();
+        if (className.endsWith(".ProvisionedThroughputExceededException")
+                || className.endsWith(".RequestLimitExceededException")
+                || className.endsWith(".InternalServerErrorException")
+                || className.endsWith(".ApiCallTimeoutException")
+                || className.endsWith(".ApiCallAttemptTimeoutException")
+                || className.endsWith(".RetryableException")) {
             return FailureType.RETRYABLE;
         }
 
-        if (e instanceof software.amazon.awssdk.awscore.exception.AwsServiceException) {
-            software.amazon.awssdk.awscore.exception.AwsServiceException awsEx = 
-                (software.amazon.awssdk.awscore.exception.AwsServiceException) e;
-            if (awsEx.isThrottlingException() || awsEx.statusCode() >= 500) {
+        if (className.startsWith("software.amazon.awssdk.")) {
+            try {
+                Object throttling = e.getClass().getMethod("isThrottlingException").invoke(e);
+                if (Boolean.TRUE.equals(throttling)) {
+                    return FailureType.RETRYABLE;
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Not every AWS exception exposes this method.
+            }
+            try {
+                Object statusCode = e.getClass().getMethod("statusCode").invoke(e);
+                if (statusCode instanceof Integer code && code >= 500) {
+                    return FailureType.RETRYABLE;
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Not every AWS exception exposes this method.
+            }
+            try {
+                Object retryable = e.getClass().getMethod("retryable").invoke(e);
+                if (Boolean.TRUE.equals(retryable)) {
+                    return FailureType.RETRYABLE;
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Not every AWS exception exposes this method.
+            }
+            try {
+                Object details = e.getClass().getMethod("awsErrorDetails").invoke(e);
+                if (details != null) {
+                    Object statusCode = details.getClass().getMethod("sdkHttpResponse").invoke(details);
+                    if (statusCode != null) {
+                        Object code = statusCode.getClass().getMethod("statusCode").invoke(statusCode);
+                        if (code instanceof Integer httpCode && httpCode >= 500) {
+                            return FailureType.RETRYABLE;
+                        }
+                    }
+                }
+            } catch (ReflectiveOperationException ignored) {
+                // Best-effort only; unknown AWS exceptions fall through as non-retryable.
+            }
+            String message = e.getMessage();
+            if (message != null && message.toLowerCase(java.util.Locale.ROOT).contains("throttl")) {
                 return FailureType.RETRYABLE;
             }
         }
@@ -233,7 +281,6 @@ public final class Backfill {
                          List<FailureDetail> failureDetails) {}
 
     public record FailureDetail(String account, String month, String transactionId,
-                                int attempts, long processedCount, long failedCount,
-                                FailureType failureType, String errorType,
-                                String errorMessage, boolean finalSuccess) {}
+                                int attempts, FailureType failureType, String errorType,
+                                String errorMessage) {}
 }

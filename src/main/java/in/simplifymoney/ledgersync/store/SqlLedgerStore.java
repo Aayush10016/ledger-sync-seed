@@ -86,7 +86,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 // Java-based backfill for txn_id
                 List<NormalizedTxn> toUpdate = new ArrayList<>();
                 try (Statement s = conn.createStatement();
-                     ResultSet rs = s.executeQuery("SELECT account_last4, occurred_at, direction, amount, category, merchant, source_message_ids FROM ledger WHERE txn_id IS NULL")) {
+                     ResultSet rs = s.executeQuery("SELECT account_last4, occurred_at, direction, amount, category, merchant, source_message_ids, bank_reference_id FROM ledger WHERE txn_id IS NULL")) {
                     
                     while (rs.next()) {
                         toUpdate.add(new NormalizedTxn(
@@ -96,7 +96,8 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                             rs.getBigDecimal(4).setScale(2),
                             Category.valueOf(rs.getString(5)),
                             rs.getString(6),
-                            Arrays.stream(rs.getString(7).split(",")).filter(x -> !x.isBlank()).sorted().toList()
+                            Arrays.stream(rs.getString(7).split(",")).filter(x -> !x.isBlank()).sorted().toList(),
+                            rs.getString(8)
                         ));
                     }
                 }
@@ -109,7 +110,13 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                             ids.addAll(i.sourceMessageIds());
                             java.util.List<String> sorted = new java.util.ArrayList<>(ids);
                             java.util.Collections.sort(sorted);
-                            return new NormalizedTxn(e.accountLast4(), e.occurredAt(), e.direction(), e.amount(), e.category(), e.merchant(), sorted);
+                            String bankRef;
+                            try {
+                                bankRef = mergeBankReference(e.bankReferenceId(), i.bankReferenceId());
+                            } catch (SQLException ex) {
+                                throw new IllegalStateException(ex);
+                            }
+                            return new NormalizedTxn(e.accountLast4(), e.occurredAt(), e.direction(), e.amount(), e.category(), e.merchant(), sorted, bankRef);
                         });
                     }
                     System.out.println("Backfilling txn_id for " + deduplicated.size() + " legacy records...");
@@ -149,6 +156,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 validateCompatibleIdentity(existing, t);
                 java.util.Set<String> mergedIds = new java.util.TreeSet<>(existing.sourceMessageIds());
                 mergedIds.addAll(t.sourceMessageIds());
+                String bankRef = mergeBankReference(existing.bankReferenceId(), t.bankReferenceId());
                 toSave = new NormalizedTxn(
                         t.accountLast4(),
                         t.occurredAt(),
@@ -156,14 +164,15 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         t.amount(),
                         t.category(),
                         t.merchant(),
-                        new java.util.ArrayList<>(mergedIds));
+                        new java.util.ArrayList<>(mergedIds),
+                        bankRef);
             }
         }
 
         try (PreparedStatement ps = conn.prepareStatement(
                 "MERGE INTO ledger(account_last4, occurred_at, direction, amount,"
-                        + " category, merchant, source_message_ids, txn_id) KEY(txn_id)"
-                        + " VALUES (?,?,?,?,?,?,?,?)")) {
+                        + " category, merchant, source_message_ids, txn_id, bank_reference_id) KEY(txn_id)"
+                        + " VALUES (?,?,?,?,?,?,?,?,?)")) {
             ps.setString(1, toSave.accountLast4());
             ps.setString(2, toSave.occurredAt().toString());
             ps.setString(3, toSave.direction().name());
@@ -172,6 +181,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             ps.setString(6, toSave.merchant());
             ps.setString(7, String.join(",", toSave.sourceMessageIds()));
             ps.setString(8, txnId);
+            ps.setString(9, toSave.bankReferenceId());
             ps.executeUpdate();
         }
 
@@ -204,7 +214,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
     private NormalizedTxn loadByTxnId(Connection conn, String txnId) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
                 "SELECT account_last4, occurred_at, direction, amount, category,"
-                        + " merchant, source_message_ids FROM ledger WHERE txn_id = ?")) {
+                        + " merchant, source_message_ids, bank_reference_id FROM ledger WHERE txn_id = ?")) {
             ps.setString(1, txnId);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
@@ -216,7 +226,8 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         Category.valueOf(rs.getString(5)),
                         rs.getString(6),
                         Arrays.stream(rs.getString(7).split(","))
-                                .filter(s -> !s.isBlank()).sorted().toList());
+                                .filter(s -> !s.isBlank()).sorted().toList(),
+                        rs.getString(8));
             }
         }
     }
@@ -230,6 +241,16 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                 || !java.util.Objects.equals(existing.merchant(), incoming.merchant())) {
             throw new SQLException("source message already belongs to an incompatible transaction");
         }
+        mergeBankReference(existing.bankReferenceId(), incoming.bankReferenceId());
+    }
+
+    private static String mergeBankReference(String existing, String incoming) throws SQLException {
+        if (existing == null || existing.isBlank()) return incoming;
+        if (incoming == null || incoming.isBlank()) return existing;
+        if (!existing.equals(incoming)) {
+            throw new SQLException("source message already belongs to a transaction with conflicting bank reference");
+        }
+        return existing;
     }
 
     private void upsertSourceMapping(Connection conn, String sourceId, String txnId) throws SQLException {
@@ -320,7 +341,7 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
                      "SELECT account_last4, occurred_at, direction, amount, category,"
-                             + " merchant, source_message_ids FROM ledger ORDER BY occurred_at")) {
+                             + " merchant, source_message_ids, bank_reference_id FROM ledger ORDER BY occurred_at")) {
             while (rs.next()) {
                 out.add(new NormalizedTxn(
                         rs.getString(1),
@@ -330,7 +351,8 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
                         Category.valueOf(rs.getString(5)),
                         rs.getString(6),
                         Arrays.stream(rs.getString(7).split(","))
-                                .filter(s -> !s.isBlank()).sorted().toList()));
+                                .filter(s -> !s.isBlank()).sorted().toList(),
+                        rs.getString(8)));
             }
         } catch (SQLException e) {
             throw new IllegalStateException("could not read the ledger", e);

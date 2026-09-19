@@ -47,7 +47,7 @@ public class EndToEndBackfillIntegrationTest {
         // 1. Setup SQL Store
         Path tempDir = Files.createTempDirectory("dbtest");
         dbFile = tempDir.resolve("test_db");
-        Path migrationDir = Path.of(System.getProperty("user.dir"), "db", "migration");
+        Path migrationDir = schemaOnlyMigrations();
         sqlStore = new SqlLedgerStore(dbFile);
         sqlStore.migrate(migrationDir);
 
@@ -138,5 +138,19 @@ public class EndToEndBackfillIntegrationTest {
             
         assertEquals(1, duplicateDivergences, "Expect exactly 1 SQL_DUPLICATE_IDENTITY divergence");
         assertEquals(1, divergences.size(), "Should have exactly 1 divergence total (the duplicate in SQL)");
+    }
+
+    private static Path schemaOnlyMigrations() throws Exception {
+        Path source = Path.of(System.getProperty("user.dir"), "db", "migration");
+        Path target = Files.createTempDirectory("schema-only-migrations");
+        try (var files = Files.list(source)) {
+            for (Path file : files.filter(path -> path.getFileName().toString().endsWith(".sql")).toList()) {
+                if ("V2__seed.sql".equals(file.getFileName().toString())) {
+                    continue;
+                }
+                Files.copy(file, target.resolve(file.getFileName()), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        return target;
     }
 }

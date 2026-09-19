@@ -131,6 +131,52 @@ public class DynamoDbLedgerStoreIntegrationTest {
     }
 
     @Test
+    public void testBankReferenceRoundTripsAndCanCompleteExistingTransaction() {
+        NormalizedTxn withReference = new NormalizedTxn(
+                "9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND,
+                "Merch", List.of("ref-msg"), "BANK-REF-1");
+        store.save(withReference);
+        assertEquals("BANK-REF-1", store.byMessageId("ref-msg").orElseThrow().bankReferenceId());
+
+        NormalizedTxn withoutReference = new NormalizedTxn(
+                "9999", OffsetDateTime.parse("2026-07-04T10:05:00Z"),
+                Direction.DEBIT, new BigDecimal("20.00"), Category.SPEND,
+                "Merch", List.of("ref-root"));
+        NormalizedTxn completedReference = new NormalizedTxn(
+                "9999", OffsetDateTime.parse("2026-07-04T10:05:00Z"),
+                Direction.DEBIT, new BigDecimal("20.00"), Category.SPEND,
+                "Merch", List.of("ref-root", "ref-extra"), "BANK-REF-2");
+
+        store.save(withoutReference);
+        store.save(completedReference);
+
+        NormalizedTxn completed = store.byMessageId("ref-root").orElseThrow();
+        assertEquals("BANK-REF-2", completed.bankReferenceId());
+        assertEquals(completed, store.byMessageId("ref-extra").orElseThrow());
+        assertEquals(new BigDecimal("30.50"), store.categoryTotals("9999").get(Category.SPEND));
+    }
+
+    @Test
+    public void testConflictingBankReferenceForOwnedSourceIsRejected() {
+        NormalizedTxn first = new NormalizedTxn(
+                "9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND,
+                "Merch", List.of("owned-ref"), "REF-A");
+        NormalizedTxn conflicting = new NormalizedTxn(
+                "9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
+                Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND,
+                "Merch", List.of("owned-ref", "owned-ref-extra"), "REF-B");
+
+        store.save(first);
+        assertThrows(IllegalStateException.class, () -> store.save(conflicting));
+
+        assertEquals("REF-A", store.byMessageId("owned-ref").orElseThrow().bankReferenceId());
+        assertFalse(store.byMessageId("owned-ref-extra").isPresent());
+        assertEquals(new BigDecimal("10.50"), store.categoryTotals("9999").get(Category.SPEND));
+    }
+
+    @Test
     public void testNewSourceIdsMergeIntoExistingTransactionWithoutDoubleCounting() {
         NormalizedTxn first = new NormalizedTxn("9999", OffsetDateTime.parse("2026-07-04T10:00:00Z"),
                 Direction.DEBIT, new BigDecimal("10.50"), Category.SPEND, "Merch", List.of("old-msg"));
@@ -393,11 +439,11 @@ public class DynamoDbLedgerStoreIntegrationTest {
         assertEquals(new BigDecimal("99.00"), recovered.amount());
         assertEquals(1, store.scanAllTransactions().size());
 
-        // The old transaction was deleted directly, leaving its category total orphaned.
-        // The new save added its amount (99.00) to the existing total (15.00).
-        assertEquals(new BigDecimal("114.00"), store.categoryTotals("9999").get(Category.SPEND));
+        // Recovery rebuilds category totals after atomically recreating the transaction and pointers,
+        // so the old orphaned 15.00 total must not remain.
+        assertEquals(new BigDecimal("99.00"), store.categoryTotals("9999").get(Category.SPEND));
         
-        // Rebuild category totals to fix the orphaned aggregate
+        // An explicit rebuild remains idempotent.
         store.rebuildCategoryTotals("9999");
         assertEquals(new BigDecimal("99.00"), store.categoryTotals("9999").get(Category.SPEND));
     }

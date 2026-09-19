@@ -155,6 +155,7 @@ public final class ConsistencyChecker {
         compare(identity, "category", sql.category().name(), doc.category().name(), out);
         compare(identity, "merchant", canonicalString(sql.merchant()), canonicalString(doc.merchant()), out);
         compare(identity, "sourceMessageIds", canonicalSources(sql), canonicalSources(doc), out);
+        compare(identity, "bankReferenceId", canonicalString(sql.bankReferenceId()), canonicalString(doc.bankReferenceId()), out);
     }
 
     private static void compare(String identity, String field, String sql, String doc, List<Divergence> out) {

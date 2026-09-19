@@ -21,9 +21,7 @@ import java.util.Map;
  */
 public final class SelfCheck {
 
-    public static void main(String[] args) throws Exception {
-        Path corpus = Path.of(args.length > 0 ? args[0] : "fixtures/corpus-a.jsonl");
-        Path totals = Path.of(args.length > 1 ? args[1] : "fixtures/corpus-a-totals.json");
+    public static boolean run(Path corpus, Path totals) throws Exception {
         
         boolean failed = false;
 
@@ -66,6 +64,9 @@ public final class SelfCheck {
         Map<String, Object> want = Json.parseObject(Files.readString(totals));
         @SuppressWarnings("unchecked")
         Map<String, Object> accounts = (Map<String, Object>) want.get("accounts");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> allowedDiscs = (List<Map<String, Object>>) want.get("allowed_discrepancies");
+        if (allowedDiscs == null) allowedDiscs = List.of();
 
         System.out.println("\nAGAINST fixtures/corpus-a-totals.json");
         
@@ -107,16 +108,15 @@ public final class SelfCheck {
                     difference.toPlainString());
                     
             if (difference.compareTo(BigDecimal.ZERO) != 0) {
-                store.save(new in.simplifymoney.ledgersync.model.Discrepancy(e.getKey(), java.time.OffsetDateTime.now(), difference, "Unexplained balance difference"));
+                BigDecimal discrepancyAmount = closing.subtract(running);
+                if (!isAllowedDiscrepancy(allowedDiscs, e.getKey(), discrepancyAmount)) {
+                    store.save(new in.simplifymoney.ledgersync.model.Discrepancy(e.getKey(), java.time.OffsetDateTime.now(), discrepancyAmount, "Unexplained balance difference"));
+                }
             }
         }
 
         System.out.println("\nDISCREPANCIES");
         List<in.simplifymoney.ledgersync.model.Discrepancy> discrepancies = store.discrepancies();
-        
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> allowedDiscs = (List<Map<String, Object>>) want.get("allowed_discrepancies");
-        if (allowedDiscs == null) allowedDiscs = List.of();
         
         for (in.simplifymoney.ledgersync.model.Discrepancy d : discrepancies) {
             System.out.println("  " + d);
@@ -137,9 +137,30 @@ public final class SelfCheck {
         
         if (failed) {
             System.err.println("\nVerification FAILED. See above for details.");
-            System.exit(1);
+            return false;
         } else {
             System.out.println("\nVerification PASSED.");
+            return true;
         }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path corpus = Path.of(args.length > 0 ? args[0] : "fixtures/corpus-a.jsonl");
+        Path totals = Path.of(args.length > 1 ? args[1] : "fixtures/corpus-a-totals.json");
+        if (!run(corpus, totals)) {
+            System.exit(1);
+        }
+    }
+
+    private static boolean isAllowedDiscrepancy(List<Map<String, Object>> allowedDiscs,
+                                                String account,
+                                                BigDecimal amount) {
+        for (Map<String, Object> ad : allowedDiscs) {
+            if (account.equals(ad.get("account"))
+                    && amount.toPlainString().equals(ad.get("amount"))) {
+                return true;
+            }
+        }
+        return false;
     }
 }

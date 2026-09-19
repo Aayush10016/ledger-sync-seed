@@ -80,7 +80,7 @@ public class LifecycleIntegrationTest {
         // Phase 1: Real SQL Store in temporary directory
         Path tempDir = Files.createTempDirectory("lifecycle-sql-test");
         SqlLedgerStore sqlStore = new SqlLedgerStore(tempDir.resolve("db"));
-        sqlStore.migrate(Path.of(System.getProperty("user.dir"), "db", "migration"));
+        sqlStore.migrate(schemaOnlyMigrations());
         sqlStore.save(original);
         
         // Assert SQL store actually has it
@@ -141,5 +141,19 @@ public class LifecycleIntegrationTest {
                 assertTrue(seenMessageIds.add(msgId), "Source message ID " + msgId + " mapped to multiple transactions!");
             }
         }
+    }
+
+    private static Path schemaOnlyMigrations() throws Exception {
+        Path source = Path.of(System.getProperty("user.dir"), "db", "migration");
+        Path target = Files.createTempDirectory("schema-only-migrations");
+        try (var files = Files.list(source)) {
+            for (Path file : files.filter(path -> path.getFileName().toString().endsWith(".sql")).toList()) {
+                if ("V2__seed.sql".equals(file.getFileName().toString())) {
+                    continue;
+                }
+                Files.copy(file, target.resolve(file.getFileName()), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
+        return target;
     }
 }

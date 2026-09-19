@@ -51,7 +51,7 @@ public final class IngestService {
         List<RawMessage> messages = readResult.validRecords();
         List<ParsedTxn> parsedTxns = new ArrayList<>();
         List<SkipDetail> skipDetails = new ArrayList<>();
-        
+
         for (RawMessage m : messages) {
             try {
                 Optional<ParsedTxn> p = parsers.parse(m);
@@ -64,7 +64,7 @@ public final class IngestService {
                 skipDetails.add(new SkipDetail(m.messageId(), e.getMessage()));
             }
         }
-        
+
         if (!skipDetails.isEmpty()) {
             System.err.println("Skipped " + skipDetails.size() + " messages:");
             Map<String, Integer> reasons = new java.util.HashMap<>();
@@ -106,12 +106,12 @@ public final class IngestService {
                 recordsRead++;
                 try {
                     Map<String, Object> o = Json.parseObject(line);
-                    
+
                     String messageId = (String) o.get("message_id");
                     String channel = (String) o.get("channel");
                     String receivedAtStr = (String) o.get("received_at");
                     OffsetDateTime receivedAt = receivedAtStr == null ? null : OffsetDateTime.parse(receivedAtStr);
-                    
+
                     out.add(new RawMessage(
                             messageId,
                             channel,
@@ -143,12 +143,12 @@ public final class IngestService {
         List<List<ParsedTxn>> groups = new ArrayList<>();
         for (ParsedTxn p : parsed) {
             String key = p.accountLast4() + "|" + p.occurredAt().toEpochSecond() + "|" + p.direction().name() + "|" + p.amount().toPlainString();
-            
+
             boolean added = false;
             for (List<ParsedTxn> group : groups) {
                 ParsedTxn first = group.get(0);
                 String firstKey = first.accountLast4() + "|" + first.occurredAt().toEpochSecond() + "|" + first.direction().name() + "|" + first.amount().toPlainString();
-                
+
                 if (key.equals(firstKey)) {
                     // Check if balances conflict
                     java.math.BigDecimal bal1 = p.statedBalance();
@@ -163,23 +163,30 @@ public final class IngestService {
                     if (bal1 != null && groupBal != null && bal1.compareTo(groupBal) != 0) {
                         balancesConflict = true;
                     }
-                    
+
                     // Strong evidence check: Bank references
                     boolean refConflict = false;
                     boolean refMatch = false;
                     String ref1 = p.bankReferenceId();
-                    
+
                     for (ParsedTxn item : group) {
                         String ref2 = item.bankReferenceId();
                         if (ref1 != null && ref2 != null) {
                             if (ref1.equals(ref2)) {
                                 refMatch = true;
                             } else {
-                                refConflict = true; // Any conflict in bank references means they are distinct
+                                RawMessage rawP = rawMap.get(p.sourceMessageId());
+                                RawMessage rawItem = rawMap.get(item.sourceMessageId());
+                                boolean sameChannel = (rawP != null && rawItem != null && rawP.channel().equals(rawItem.channel()));
+                                boolean isTransfer = isTransferMerchant(p.merchant()) || isTransferMerchant(item.merchant());
+
+                                if (sameChannel || isTransfer) {
+                                    refConflict = true;
+                                }
                             }
                         }
                     }
-                    
+
                     // Check channel conflicts: same channel means they MUST be distinct if no bank reference matched
                     // UNLESS they are identical duplicate messages (same body)
                     boolean channelConflict = false;
@@ -232,7 +239,7 @@ public final class IngestService {
             }
             String bestMerchant = chooseBestMerchant(group, rawMap);
             Category c = determineCategory(group, bestMerchant);
-            
+
             String bankRef = null;
             for (ParsedTxn item : group) {
                 if (item.bankReferenceId() != null) {
@@ -240,7 +247,7 @@ public final class IngestService {
                     break;
                 }
             }
-            
+
             out.add(new NormalizedTxn(
                     first.accountLast4(),
                     first.occurredAt(),
@@ -264,7 +271,7 @@ public final class IngestService {
         for (NormalizedTxn t : out) {
             byAcct.computeIfAbsent(t.accountLast4(), k -> new ArrayList<>()).add(t);
         }
-        
+
         for (Map.Entry<String, List<NormalizedTxn>> entry : byAcct.entrySet()) {
             String acct = entry.getKey();
             if (accountsWithoutReliableBalances.contains(acct)) continue;
@@ -277,7 +284,7 @@ public final class IngestService {
             for (NormalizedTxn t : txns) {
                 java.math.BigDecimal amt = t.direction() == Direction.DEBIT ? t.amount().negate() : t.amount();
                 sumSinceLastBalance = sumSinceLastBalance.add(amt);
-                
+
                 java.math.BigDecimal statedBal = null;
                 if (t.sourceMessageIds() != null && !t.sourceMessageIds().isEmpty()) {
                     for (ParsedTxn p : uniqueParsed) {
@@ -306,7 +313,7 @@ public final class IngestService {
                                 store.save(d);
                                 existingDiscKeys.add(dKey);
                             }
-                            
+
                         }
                     }
                     lastBalance = statedBal;
@@ -314,10 +321,10 @@ public final class IngestService {
                 }
             }
         }
-        
+
         // Identify TRANSFER
         categorizeTransfers(out);
-        
+
         return out;
     }
 
@@ -334,7 +341,7 @@ public final class IngestService {
                     t1.amount().compareTo(t2.amount()) == 0 &&
                     t1.direction() != t2.direction() &&
                     hasTransferEvidence(t1, t2)) {
-                    
+
                     long diff = Math.abs(t1.occurredAt().toEpochSecond() - t2.occurredAt().toEpochSecond());
                     if (diff <= 300) {
                         out.set(i, withCategory(t1, Category.TRANSFER));
@@ -420,7 +427,7 @@ public final class IngestService {
                 return false; // Conflicting bank references mean they cannot be the same transfer
             }
         }
-        
+
         String leftMerchant = normalizeTransferMerchant(left.merchant());
         String rightMerchant = normalizeTransferMerchant(right.merchant());
         return !leftMerchant.isBlank()
@@ -439,6 +446,13 @@ public final class IngestService {
         if (normalized.startsWith("SENT ")) normalized = normalized.substring(5).trim();
         if (normalized.startsWith("RECEIVED ")) normalized = normalized.substring(9).trim();
         return normalized;
+    }
+
+    private static boolean isTransferMerchant(String merchant) {
+        if (merchant == null) return false;
+        String normalized = merchant.toUpperCase(java.util.Locale.ROOT);
+        return normalized.contains("IMPS") || normalized.contains("NEFT")
+                || normalized.contains("UPI") || normalized.contains("TRANSFER");
     }
 
     private static java.util.Set<String> configuredAccountsWithoutReliableBalances() {
@@ -480,7 +494,7 @@ public final class IngestService {
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped,
                         int failedWrites, List<SkipDetail> skipDetails,
                         int malformedRecords, List<MalformedRecord> malformedDetails) {}
-    
+
     public record SkipDetail(String messageId, String reason) {}
 
     public record MalformedRecord(int lineNumber, String reason, String rawRecord) {}
